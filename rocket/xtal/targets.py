@@ -95,7 +95,8 @@ class LLGloss(torch.nn.Module):
 
             # Initialize from correlation coefficient
             sigmaA_i = (
-                torch.corrcoef(torch.stack([Eobs_i**2, Ecalc_i**2], dim=0))[1][0]
+                torch
+                .corrcoef(torch.stack([Eobs_i**2, Ecalc_i**2], dim=0))[1][0]
                 .clamp(min=0.001, max=0.999)
                 .sqrt()
                 .to(device=self.device, dtype=torch.float32)
