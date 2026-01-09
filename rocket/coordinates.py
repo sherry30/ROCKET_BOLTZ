@@ -17,11 +17,11 @@ def rigidbody_refine_quat(
     xyz,
     llgloss,
     cra_name,
-    lbfgs=False,
+    lbfgs=False,  # noqa: FBT002
     added_chain_HKL=None,
     added_chain_asu=None,
     lbfgs_lr=150.0,
-    verbose=True,
+    verbose=True,  # noqa: FBT002
     domain_segs=None,
 ):
     resid = [int(i.split("-")[1]) + 1 for i in cra_name]
@@ -91,7 +91,7 @@ def find_rigidbody_matrix_lbfgs_quat(
     added_chain_HKL=None,
     added_chain_asu=None,
     lbfgs_lr=150.0,
-    verbose=True,
+    verbose=True,  # noqa: FBT002
 ):
     n_domains = len(domain_bools)
     qs = [
@@ -127,7 +127,7 @@ def find_rigidbody_matrix_adam_quat(
     device,
     added_chain_HKL=None,
     added_chain_asu=None,
-    verbose=True,
+    verbose=True,  # noqa: FBT002
 ):
     q = torch.tensor(
         [1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=device, requires_grad=True
@@ -158,7 +158,7 @@ def pose_train_lbfgs_quat(
     loss_track=None,
     added_chain_HKL=None,
     added_chain_asu=None,
-    verbose=True,
+    verbose=True,  # noqa: FBT002
 ):
     if loss_track is None:
         loss_track = []
@@ -223,7 +223,7 @@ def pose_train_adam_quat(
     loss_track=None,
     added_chain_HKL=None,
     added_chain_asu=None,
-    verbose=True,
+    verbose=True,  # noqa: FBT002
 ):
     if loss_track is None:
         loss_track = []
@@ -508,8 +508,8 @@ def write_pdb_with_positions(input_pdb_file, positions, output_pdb_file):
                     0
                 )  # Pop the first rounded position from the list
                 new_line = (
-                    f"{atom_info}{rounded_pos[0]:8.3f}{rounded_pos[1]:8.3f}{rounded_pos[2]:8.3f}"
-                    + line[54:]
+                    f"{atom_info}{rounded_pos[0]:8.3f}{rounded_pos[1]:8.3f}"
+                    f"{rounded_pos[2]:8.3f}" + line[54:]
                 )
                 f_out.write(new_line)
             else:
@@ -802,7 +802,7 @@ def iterative_kabsch_alignment(
             utils.assert_numpy(weights)[working_set_mask]
             if weights is not None
             else None
-        )  # noqa: E501
+        )
 
         # --- 4. Iterative Alignment for the Current Domain ---
         inlier_indices = np.arange(moving_align_coords.shape[0])
@@ -813,7 +813,7 @@ def iterative_kabsch_alignment(
             Q_iter = moving_align_coords[inlier_indices]
             w_iter = (
                 align_weights[inlier_indices] if align_weights is not None else None
-            )  # noqa: E501
+            )
             try:
                 R_iter = weighted_kabsch_svd(P_iter, Q_iter, weights=w_iter)
             except ValueError:
@@ -831,12 +831,12 @@ def iterative_kabsch_alignment(
             transformed_align_coords = (final_R @ moving_align_coords.T).T + t_iter
             distances = np.linalg.norm(
                 ref_align_coords - transformed_align_coords, axis=1
-            )  # noqa: E501
+            )
             new_inlier_indices = np.where(distances < cutoff)[0]
 
             if len(new_inlier_indices) < 3 or np.array_equal(
                 inlier_indices, new_inlier_indices
-            ):  # noqa: E501
+            ):
                 break
             inlier_indices = new_inlier_indices
         # --- 5. Apply Final Transformation to the Entire Domain ---
