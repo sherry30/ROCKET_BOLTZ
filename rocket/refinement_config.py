@@ -118,6 +118,10 @@ class DataConfig(BaseModel):
     model_config = {"use_enum_values": True}
 
 
+class AlphaFoldConfig(BaseModel):
+    use_deepspeed_evo_attention: bool = True  # Default to True
+
+
 # Main configuration class
 class RocketRefinmentConfig(BaseModel):
     # Metadata
@@ -128,6 +132,7 @@ class RocketRefinmentConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     algorithm: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    alphafold: AlphaFoldConfig = Field(default_factory=AlphaFoldConfig)
 
     model_config = {"use_enum_values": True}
 
@@ -149,6 +154,8 @@ class RocketRefinmentConfig(BaseModel):
         "cuda_device": "execution.cuda_device",
         "num_of_runs": "execution.num_of_runs",
         "verbose": "execution.verbose",
+        # AlphaFold
+        "use_deepspeed_evo_attention": "alphafold.use_deepspeed_evo_attention",
         # Algorithm
         "bias_version": "algorithm.bias_version",
         "iterations": "algorithm.iterations",
