@@ -327,7 +327,12 @@ def gen_config(
         return phase1_config, phase2_config
 
 
-def gen_config_phase1(datamode: DATAMODE, working_dir: str, file_id: str):
+def gen_config_phase1(
+    datamode: DATAMODE,
+    working_dir: str,
+    file_id: str,
+    use_deepspeed_evo_attention: bool = True,
+):
     phase1_config = RocketRefinmentConfig(
         note="phase1_<your_note_here>",
         paths=PathConfig(
@@ -356,6 +361,9 @@ def gen_config_phase1(datamode: DATAMODE, working_dir: str, file_id: str):
         data=DataConfig(
             datamode=datamode,
             min_resolution=3.0,
+        ),
+        alphafold=AlphaFoldConfig(
+            use_deepspeed_evo_attention=use_deepspeed_evo_attention,
         ),
     )
     return phase1_config
