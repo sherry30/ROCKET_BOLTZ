@@ -268,7 +268,8 @@ def init_bias(
     elif bias_version == 3:
         if starting_weights is not None:
             device_processed_features["msa_feat_weights"] = (
-                torch.load(glob.glob(starting_weights)[0])
+                torch
+                .load(glob.glob(starting_weights)[0])
                 .detach()
                 .to(device=device)
                 .requires_grad_(True)
@@ -284,7 +285,8 @@ def init_bias(
             )
         elif starting_bias is not None:
             device_processed_features["msa_feat_bias"] = (
-                torch.load(glob.glob(starting_bias)[0])
+                torch
+                .load(glob.glob(starting_bias)[0])
                 .detach()
                 .to(device=device)
                 .requires_grad_(True)

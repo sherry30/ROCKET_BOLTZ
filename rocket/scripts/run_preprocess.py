@@ -469,6 +469,7 @@ def cli_runpreprocess():
         datamode=args.method,
         file_id=args.file_id,
         working_dir=os.path.abspath(args.output_dir),
+        use_deepspeed_evo_attention=args.use_deepspeed_evoformer_attention,
     )
     phase1_config.algorithm.init_recycling = args.max_recycling_iters
     if seg_id:

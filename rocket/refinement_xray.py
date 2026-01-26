@@ -180,7 +180,9 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
         4: rocket.TemplateBiasAF,
     }
     af_bias = version_to_class[config.bias_version](
-        model_config(PRESET, train=True), PRESET
+        model_config(PRESET, train=True),
+        PRESET,
+        use_deepspeed_evo_attention=config.use_deepspeed_evo_attention,
     ).to(device)
     af_bias.freeze()  # Free all AF2 parameters to save time
 
