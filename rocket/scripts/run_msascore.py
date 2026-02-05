@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+"""
+Run LLG scoring for system with different MSAs, supporting both xray and cryoem modes.
+"""
 
 import argparse
 import glob
 import os
 import shutil
+from typing import Literal
 
 import pandas as pd
 import torch
@@ -80,35 +84,100 @@ def main():
     parser.add_argument(
         "--score_fullmsa", action="store_true", help="Also score the full msa"
     )
+    parser.add_argument(
+        "--full_msa_dir",
+        default=None,
+        type=str,
+        help="Path to full MSA directory (default: path/alignments)",
+    )
     config = parser.parse_args()
 
+    run_msa_score(
+        path=config.path,
+        system=config.system,
+        msa_input_prefix=config.i,
+        output_dir_name=config.o,
+        datamode=config.datamode,
+        domain_segs=config.domain_segs,
+        additional_chain=config.additional_chain,
+        init_recycling=config.init_recycling,
+        free_flag=config.free_flag,
+        testset_value=config.testset_value,
+        voxel_spacing=config.voxel_spacing,
+        min_resolution=config.min_resolution,
+        chimera_profile=config.chimera_profile,
+        score_fullmsa=config.score_fullmsa,
+        full_msa_dir=config.full_msa_dir,
+    )
+
+
+def run_msa_score(
+    path: str,
+    system: str,
+    msa_input_prefix: str,
+    output_dir_name: str,
+    datamode: Literal["xray", "cryoem"],
+    domain_segs: list[int] | None = None,
+    additional_chain: bool = False,
+    init_recycling: int = 4,
+    free_flag: str = "R-free-flags",
+    testset_value: int = 1,
+    voxel_spacing: float = 4.5,
+    min_resolution: float = 3.0,
+    chimera_profile: bool = False,
+    score_fullmsa: bool = False,
+    full_msa_dir: str | None = None,
+) -> str:
+    """
+    Run LLG scoring for system with different MSAs.
+
+    Args:
+        path: Path to parent folder
+        system: file_id for the dataset
+        msa_input_prefix: prefix for msas to use, path will prepend
+        output_dir_name: name of output directory to write prediction and scoring to, path will prepend
+        datamode: Choose between "xray" or "cryoem" mode
+        domain_segs: A list of resid as domain boundaries
+        additional_chain: Additional Chain in ASU
+        init_recycling: Number of initial recycling iterations
+        free_flag: Column name of free flag
+        testset_value: Value for test set
+        voxel_spacing: Voxel spacing for solvent percentage estimation
+        min_resolution: Min resolution cut
+        chimera_profile: Use chimera profile
+        score_fullmsa: Also score the full msa
+        full_msa_dir: Path to full MSA directory (default: path/alignments)
+
+    Returns:
+        Path to the output directory
+    """
     device = rk_utils.try_gpu()
     RBR_LBFGS = True
 
-    output_directory_path = os.path.join(config.path, config.o)
+    output_directory_path = os.path.join(path, output_dir_name)
     os.makedirs(output_directory_path, exist_ok=True)
 
-    logger.info(f"Working with system {config.system}", flush=True)
+    logger.info(f"Working with system {system}", flush=True)
 
     # Input paths
-    tng_file = os.path.join(config.path, "ROCKET_inputs", f"{config.system}-Edata.mtz")
+    tng_file = os.path.join(path, "ROCKET_inputs", f"{system}-Edata.mtz")
     input_pdb = os.path.join(
-        config.path, "ROCKET_inputs", f"{config.system}-pred-aligned.pdb"
+        path, "ROCKET_inputs", f"{system}-pred-aligned.pdb"
     )
 
     # Handle additional chain
     constant_fp_added_HKL = None
     constant_fp_added_asu = None
-    if config.additional_chain:
+    if additional_chain:
         constant_fp_added_HKL = torch.load(
-            f"{config.path}/ROCKET_inputs/{config.system}_added_chain_atoms_HKL.pt"
+            f"{path}/ROCKET_inputs/{system}_added_chain_atoms_HKL.pt"
         ).to(device=device)
         constant_fp_added_asu = torch.load(
-            f"{config.path}/ROCKET_inputs/{config.system}_added_chain_atoms_asu.pt"
+            f"{path}/ROCKET_inputs/{system}_added_chain_atoms_asu.pt"
         ).to(device=device)
 
     # --- Data mode specific imports and objects ---
-    if config.datamode == "xray":
+    if datamode == "xray":
         from rocket.xtal import structurefactors as sf_module
 
         def llgloss_init(sfc, mtz, minres, maxres):
@@ -116,16 +185,16 @@ def main():
 
         initial_SFC = sf_module.initial_SFC
         SFC_kwargs = {
-            "Freelabel": config.free_flag,
+            "Freelabel": free_flag,
             "device": device,
-            "testset_value": config.testset_value,
+            "testset_value": testset_value,
             "added_chain_HKL": constant_fp_added_HKL,
             "added_chain_asu": constant_fp_added_asu,
-            "spacing": config.voxel_spacing,
+            "spacing": voxel_spacing,
         }
         LBFGS_LR = 150
 
-    elif config.datamode == "cryoem":
+    elif datamode == "cryoem":
         from rocket.cryo import structurefactors as sf_module
         from rocket.cryo import targets as cryo_targets
 
@@ -147,17 +216,17 @@ def main():
             return sf_module.initial_cryoSFC(pdb, mtz, "Emean", "PHIEmean", device, 20)
 
         SFC_kwargs = {
-            "Freelabel": config.free_flag,
+            "Freelabel": free_flag,
             "device": device,
-            "testset_value": config.testset_value,
+            "testset_value": testset_value,
             "added_chain_HKL": constant_fp_added_HKL,
             "added_chain_asu": constant_fp_added_asu,
-            "spacing": config.voxel_spacing,
+            "spacing": voxel_spacing,
         }
         LBFGS_LR = 0.1
 
     else:
-        raise ValueError(f"Unknown datamode: {config.datamode}")
+        raise ValueError(f"Unknown datamode: {datamode}")
 
     # --- SFC and LLGloss Initialization ---
     sfc = initial_SFC(input_pdb, tng_file, "FEFF", "DOBS", **SFC_kwargs)
@@ -166,8 +235,8 @@ def main():
 
     sfc_rbr = initial_SFC(input_pdb, tng_file, "FEFF", "DOBS", **SFC_kwargs)
 
-    llgloss = llgloss_init(sfc, tng_file, config.min_resolution, None)
-    llgloss_rbr = llgloss_init(sfc_rbr, tng_file, config.min_resolution, None)
+    llgloss = llgloss_init(sfc, tng_file, min_resolution, None)
+    llgloss_rbr = llgloss_init(sfc_rbr, tng_file, min_resolution, None)
 
     # AF2 model initialization
     af_bias = rocket.MSABiasAFv3(model_config(PRESET, train=True), PRESET).to(device)
@@ -176,19 +245,21 @@ def main():
     fasta_path = [
         f
         for ext in ("*.fa", "*.fasta")
-        for f in glob.glob(os.path.join(config.path, ext))
+        for f in glob.glob(os.path.join(path, ext))
     ][0]
 
-    fullmsa_dir = os.path.join(config.path, "alignments")
+    # Use provided msa_dir or fall back to default
+    if full_msa_dir is None:
+        full_msa_dir = os.path.join(path, "alignments")
     data_processor = data_pipeline.DataPipeline(template_featurizer=None)
     fullmsa_feature_dict = rkrf_utils.generate_feature_dict(
         fasta_path,
-        fullmsa_dir,
+        full_msa_dir,
         data_processor,
     )
 
     afconfig = model_config(PRESET)
-    afconfig.data.common.max_recycling_iters = config.init_recycling
+    afconfig.data.common.max_recycling_iters = init_recycling
     del afconfig.data.common.masked_msa
     afconfig.data.common.resample_msa_in_recycling = False
     feature_processor = feature_pipeline.FeaturePipeline(afconfig.data)
@@ -210,7 +281,7 @@ def main():
     df.to_csv(os.path.join(output_directory_path, "msa_scoring.csv"), index=False)
 
     # --- (Optional) Score the full MSA ---
-    if config.score_fullmsa:
+    if score_fullmsa:
         msa_name = "fullmsa"
         device_processed_features = rk_utils.move_tensors_to_device(
             fullmsa_processed_feature_dict, device=device
@@ -218,7 +289,7 @@ def main():
         af2_output, prevs = af_bias(
             device_processed_features,
             [None, None, None],
-            num_iters=config.init_recycling,
+            num_iters=init_recycling,
             bias=False,
         )
         prevs = [tensor.detach() for tensor in prevs]
@@ -233,13 +304,13 @@ def main():
             cra_name=sfc.cra_name,
             best_pos=reference_pos,
             exclude_res=None,
-            domain_segs=config.domain_segs,
+            domain_segs=domain_segs,
             reference_bfactor=init_pos_bfactor,
         )
         llgloss.sfc.atom_b_iso = pseudo_Bs.detach()
         llgloss_rbr.sfc.atom_b_iso = pseudo_Bs.detach()
 
-        if config.datamode == "xray":
+        if datamode == "xray":
             llgloss, llgloss_rbr, Ecalc, Fc = rkrf_utils.update_sigmaA(
                 llgloss=llgloss,
                 llgloss_rbr=llgloss_rbr,
@@ -251,7 +322,7 @@ def main():
             aligned_xyz,
             llgloss_rbr,
             sfc.cra_name,
-            domain_segs=config.domain_segs,
+            domain_segs=domain_segs,
             lbfgs=RBR_LBFGS,
             added_chain_HKL=constant_fp_added_HKL,
             added_chain_asu=constant_fp_added_asu,
@@ -295,7 +366,7 @@ def main():
         )
 
     # --- Score all MSAs ---
-    a3m_paths = glob.glob(os.path.join(config.path, config.i + "*.a3m"))
+    a3m_paths = glob.glob(os.path.join(path, msa_input_prefix, "*.a3m"))
     print(f"{len(a3m_paths)} msa files available...", flush=True)
     a3m_paths.sort()
 
@@ -311,7 +382,7 @@ def main():
             data_processor,
         )
         afconfig = model_config(PRESET)
-        afconfig.data.common.max_recycling_iters = config.init_recycling
+        afconfig.data.common.max_recycling_iters = init_recycling
         del afconfig.data.common.masked_msa
         afconfig.data.common.resample_msa_in_recycling = False
         feature_processor = feature_pipeline.FeaturePipeline(afconfig.data)
@@ -319,7 +390,7 @@ def main():
             feature_dict, mode="predict"
         )
 
-        if config.chimera_profile:
+        if chimera_profile:
             sub_profile = processed_feature_dict["msa_feat"][:, :, 25:48].clone()
             processed_feature_dict["msa_feat"][:, :, 25:48] = torch.where(
                 sub_profile == 0.0, full_profile.clone(), sub_profile.clone()
@@ -332,7 +403,7 @@ def main():
         af2_output, prevs = af_bias(
             device_processed_features,
             [None, None, None],
-            num_iters=config.init_recycling,
+            num_iters=init_recycling,
             bias=False,
         )
         prevs = [tensor.detach() for tensor in prevs]
@@ -347,12 +418,12 @@ def main():
             cra_name=sfc.cra_name,
             best_pos=reference_pos,
             exclude_res=None,
-            domain_segs=config.domain_segs,
+            domain_segs=domain_segs,
             reference_bfactor=init_pos_bfactor,
         )
         llgloss.sfc.atom_b_iso = pseudo_Bs.detach()
         llgloss_rbr.sfc.atom_b_iso = pseudo_Bs.detach()
-        if config.datamode == "xray":
+        if datamode == "xray":
             llgloss, llgloss_rbr, Ecalc, Fc = rkrf_utils.update_sigmaA(
                 llgloss=llgloss,
                 llgloss_rbr=llgloss_rbr,
@@ -364,7 +435,7 @@ def main():
             aligned_xyz,
             llgloss_rbr,
             sfc.cra_name,
-            domain_segs=config.domain_segs,
+            domain_segs=domain_segs,
             lbfgs=RBR_LBFGS,
             added_chain_HKL=constant_fp_added_HKL,
             added_chain_asu=constant_fp_added_asu,
@@ -407,6 +478,8 @@ def main():
             index=False,
         )
         shutil.rmtree(temp_alignment_dir)
+
+    return output_directory_path
 
 
 if __name__ == "__main__":
