@@ -5,8 +5,8 @@ Run LLG scoring for system with different MSAs, supporting both xray and cryoem 
 
 import argparse
 import glob
-import os
 import shutil
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -92,11 +92,18 @@ def main():
     )
     config = parser.parse_args()
 
+
+    msa_input_prefix=config.i
+    output_dir_name=config.o
+
+    msa_input_dir = Path(config.path) / msa_input_prefix
+    output_dir = Path(config.path) /output_dir_name
+
     run_msa_score(
         path=config.path,
         system=config.system,
-        msa_input_prefix=config.i,
-        output_dir_name=config.o,
+        msa_input_dir=msa_input_dir,
+        output_dir=output_dir,
         datamode=config.datamode,
         domain_segs=config.domain_segs,
         additional_chain=config.additional_chain,
@@ -112,10 +119,10 @@ def main():
 
 
 def run_msa_score(
-    path: str,
+    path: str | Path,
     system: str,
-    msa_input_prefix: str,
-    output_dir_name: str,
+    msa_input_dir: str | Path,
+    output_dir: str | Path,
     datamode: Literal["xray", "cryoem"],
     domain_segs: list[int] | None = None,
     additional_chain: bool = False,
@@ -134,8 +141,8 @@ def run_msa_score(
     Args:
         path: Path to parent folder
         system: file_id for the dataset
-        msa_input_prefix: prefix for msas to use, path will prepend
-        output_dir_name: name of output directory to write prediction and scoring to, path will prepend
+        msa_input_dir: dir with msa's to use
+        output_dir: output directory to write prediction and scoring to
         datamode: Choose between "xray" or "cryoem" mode
         domain_segs: A list of resid as domain boundaries
         additional_chain: Additional Chain in ASU
@@ -154,26 +161,24 @@ def run_msa_score(
     device = rk_utils.try_gpu()
     RBR_LBFGS = True
 
-    output_directory_path = os.path.join(path, output_dir_name)
-    os.makedirs(output_directory_path, exist_ok=True)
+    output_directory_path = Path(output_dir)
+    output_directory_path.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Working with system {system}", flush=True)
 
     # Input paths
-    tng_file = os.path.join(path, "ROCKET_inputs", f"{system}-Edata.mtz")
-    input_pdb = os.path.join(
-        path, "ROCKET_inputs", f"{system}-pred-aligned.pdb"
-    )
+    tng_file = Path(path) / "ROCKET_inputs" / f"{system}-Edata.mtz"
+    input_pdb = Path(path) / "ROCKET_inputs" / f"{system}-pred-aligned.pdb"
 
     # Handle additional chain
     constant_fp_added_HKL = None
     constant_fp_added_asu = None
     if additional_chain:
         constant_fp_added_HKL = torch.load(
-            f"{path}/ROCKET_inputs/{system}_added_chain_atoms_HKL.pt"
+            str(Path(path) / "ROCKET_inputs" / f"{system}_added_chain_atoms_HKL.pt")
         ).to(device=device)
         constant_fp_added_asu = torch.load(
-            f"{path}/ROCKET_inputs/{system}_added_chain_atoms_asu.pt"
+            str(Path(path) / "ROCKET_inputs" / f"{system}_added_chain_atoms_asu.pt")
         ).to(device=device)
 
     # --- Data mode specific imports and objects ---
@@ -229,28 +234,29 @@ def run_msa_score(
         raise ValueError(f"Unknown datamode: {datamode}")
 
     # --- SFC and LLGloss Initialization ---
-    sfc = initial_SFC(input_pdb, tng_file, "FEFF", "DOBS", **SFC_kwargs)
+    sfc = initial_SFC(str(input_pdb), str(tng_file), "FEFF", "DOBS", **SFC_kwargs)
     reference_pos = sfc.atom_pos_orth.clone()
     init_pos_bfactor = sfc.atom_b_iso.clone()
 
-    sfc_rbr = initial_SFC(input_pdb, tng_file, "FEFF", "DOBS", **SFC_kwargs)
+    sfc_rbr = initial_SFC(str(input_pdb), str(tng_file), "FEFF", "DOBS", **SFC_kwargs)
 
-    llgloss = llgloss_init(sfc, tng_file, min_resolution, None)
-    llgloss_rbr = llgloss_init(sfc_rbr, tng_file, min_resolution, None)
+    llgloss = llgloss_init(sfc, str(tng_file), min_resolution, None)
+    llgloss_rbr = llgloss_init(sfc_rbr, str(tng_file), min_resolution, None)
 
     # AF2 model initialization
     af_bias = rocket.MSABiasAFv3(model_config(PRESET, train=True), PRESET).to(device)
     af_bias.freeze()
 
-    fasta_path = [
-        f
+    fasta_candidates = [
+        str(p)
         for ext in ("*.fa", "*.fasta")
-        for f in glob.glob(os.path.join(path, ext))
-    ][0]
+        for p in Path(path).glob(ext)
+    ]
+    fasta_path = fasta_candidates[0]
 
     # Use provided msa_dir or fall back to default
     if full_msa_dir is None:
-        full_msa_dir = os.path.join(path, "alignments")
+        full_msa_dir = str(Path(path) / "alignments")
     data_processor = data_pipeline.DataPipeline(template_featurizer=None)
     fullmsa_feature_dict = rkrf_utils.generate_feature_dict(
         fasta_path,
@@ -278,7 +284,7 @@ def run_msa_score(
             #  "rwork"
         ]
     )
-    df.to_csv(os.path.join(output_directory_path, "msa_scoring.csv"), index=False)
+    df.to_csv(output_directory_path / "msa_scoring.csv", index=False)
 
     # --- (Optional) Score the full MSA ---
     if score_fullmsa:
@@ -340,7 +346,7 @@ def run_msa_score(
             added_chain_asu=constant_fp_added_asu,
         )
         llgloss.sfc.atom_pos_orth = optimized_xyz
-        llgloss.sfc.savePDB(f"{output_directory_path!s}/{msa_name}_postRBR.pdb")
+        llgloss.sfc.savePDB(str(output_directory_path / f"{msa_name}_postRBR.pdb"))
         (
             plddt_i,
             llg_i,
@@ -359,26 +365,27 @@ def run_msa_score(
             # "rwork": [rwork_i],
         })
         df_tmp.to_csv(
-            os.path.join(output_directory_path, "msa_scoring.csv"),
+            output_directory_path / "msa_scoring.csv",
             mode="a",
             header=False,
             index=False,
         )
 
     # --- Score all MSAs ---
-    a3m_paths = glob.glob(os.path.join(path, msa_input_prefix, "*.a3m"))
+    msa_dir = Path(msa_input_dir)
+    a3m_paths = sorted([str(p) for p in msa_dir.glob("*.a3m")]) if msa_dir.is_dir() else []
     print(f"{len(a3m_paths)} msa files available...", flush=True)
-    a3m_paths.sort()
 
     for a3m_path in tqdm(a3m_paths):
-        msa_name, ext = os.path.splitext(os.path.basename(a3m_path))
+        p = Path(a3m_path)
+        msa_name = p.stem
         data_processor = data_pipeline.DataPipeline(template_featurizer=None)
-        temp_alignment_dir = os.path.join(os.path.dirname(a3m_path), "tmp_align")
-        os.makedirs(temp_alignment_dir, exist_ok=True)
-        shutil.copy(a3m_path, os.path.join(temp_alignment_dir, msa_name + ".a3m"))
+        temp_alignment_dir = p.parent / "tmp_align"
+        temp_alignment_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(p), str(temp_alignment_dir / (msa_name + ".a3m")))
         feature_dict = rkrf_utils.generate_feature_dict(
             fasta_path,
-            temp_alignment_dir,
+            str(temp_alignment_dir),
             data_processor,
         )
         afconfig = model_config(PRESET)
@@ -453,7 +460,7 @@ def run_msa_score(
             added_chain_asu=constant_fp_added_asu,
         )
         llgloss.sfc.atom_pos_orth = optimized_xyz
-        llgloss.sfc.savePDB(f"{output_directory_path!s}/{msa_name}_postRBR.pdb")
+        llgloss.sfc.savePDB(str(output_directory_path / f"{msa_name}_postRBR.pdb"))
         (
             plddt_i,
             llg_i,
@@ -472,14 +479,14 @@ def run_msa_score(
             # "rwork": [rwork_i],
         })
         df_tmp.to_csv(
-            os.path.join(output_directory_path, "msa_scoring.csv"),
+            str(output_directory_path / "msa_scoring.csv"),
             mode="a",
             header=False,
             index=False,
         )
-        shutil.rmtree(temp_alignment_dir)
+        shutil.rmtree(str(temp_alignment_dir))
 
-    return output_directory_path
+    return str(output_directory_path)
 
 
 if __name__ == "__main__":

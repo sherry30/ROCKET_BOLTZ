@@ -9,7 +9,7 @@ https://github.com/HWaymentSteele/AF_Cluster/blob/main/scripts/ClusterMSA.py
 """
 
 import argparse
-import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -187,7 +187,7 @@ def run_msa_cluster(
     if run_tsne:
         from sklearn.manifold import TSNE
 
-    os.makedirs(output_dir, exist_ok=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     f = open(f"msacluster_{keyword}.log", "w")  # noqa: SIM115
     IDs, seqs = load_fasta(input_path)
 
@@ -308,7 +308,7 @@ def run_msa_cluster(
         write_fasta(
             tmp.SequenceName.tolist(),
             tmp.sequence.tolist(),
-            outfile=output_dir + "/" + keyword + "_" + "%03d" % clust + ".a3m",  # noqa: UP031
+            outfile=str(Path(output_dir) / f"{keyword}_{clust:03d}.a3m"),
         )
 
     print(f"writing {n_controls} size-10 uniformly sampled clusters", flush=True)
@@ -318,7 +318,7 @@ def run_msa_cluster(
         write_fasta(
             tmp.SequenceName.tolist(),
             tmp.sequence.tolist(),
-            outfile=output_dir + "/" + "U10-" + keyword + "_" + "%03d" % i + ".a3m",  # noqa: UP031
+            outfile=str(Path(output_dir) / f"U10-{keyword}_{i:03d}.a3m"),
         )
     if len(df) > 100:
         print(
@@ -330,13 +330,7 @@ def run_msa_cluster(
             write_fasta(
                 tmp.SequenceName.tolist(),
                 tmp.sequence.tolist(),
-                outfile=output_dir
-                + "/"
-                + "U100-"
-                + keyword
-                + "_"
-                + "%03d" % i  # noqa: UP031
-                + ".a3m",
+                outfile=str(Path(output_dir) / f"U100-{keyword}_{i:03d}.a3m"),
             )
 
     if run_pca:
@@ -364,7 +358,7 @@ def run_msa_cluster(
 
         plot_landscape("PC 1", "PC 2", df, query_, "PCA", output_dir=output_dir, keyword=keyword)
 
-        lprint("Saved PCA plot to " + output_dir + "/" + keyword + "_PCA.pdf", f)
+        lprint("Saved PCA plot to " + str(Path(output_dir) / f"{keyword}_PCA.pdf"), f)
 
     if run_tsne:
         lprint("Running TSNE ...", f)
@@ -384,13 +378,13 @@ def run_msa_cluster(
 
         plot_landscape("TSNE 1", "TSNE 2", df, query_, "TSNE", output_dir=output_dir, keyword=keyword)
 
-        lprint("Saved TSNE plot to " + output_dir + "/" + keyword + "_TSNE.pdf", f)
+        lprint("Saved TSNE plot to " + str(Path(output_dir) / f"{keyword}_TSNE.pdf"), f)
 
-    outfile = output_dir + "/" + keyword + "_clustering_assignments.tsv"
+    outfile = str(Path(output_dir) / f"{keyword}_clustering_assignments.tsv")
     lprint("wrote clustering data to %s" % outfile, f)  # noqa: UP031
     df.to_csv(outfile, index=False, sep="\t")
 
-    metad_outfile = output_dir + "/" + keyword + "_cluster_metadata.tsv"
+    metad_outfile = str(Path(output_dir) / f"{keyword}_cluster_metadata.tsv")
     lprint("wrote cluster metadata to %s" % metad_outfile, f)  # noqa: UP031
     metad_df = pd.DataFrame.from_records(cluster_metadata)
     metad_df.to_csv(metad_outfile, index=False, sep="\t")
