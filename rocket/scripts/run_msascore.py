@@ -6,7 +6,7 @@ Run LLG scoring for system with different MSAs, supporting both xray and cryoem 
 import argparse
 from pathlib import Path
 
-from rocket.msa_score import run_msa_score
+from rocket import run_msa_score
 
 PRESET = "model_1_ptm"
 

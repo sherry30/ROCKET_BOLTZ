@@ -9,7 +9,7 @@ https://github.com/HWaymentSteele/AF_Cluster/blob/main/scripts/ClusterMSA.py
 """
 
 import argparse
-from rocket.msa_cluster import run_msa_cluster
+from rocket import run_msa_cluster
 
 
 def main():
