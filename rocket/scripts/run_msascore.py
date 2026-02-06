@@ -8,8 +8,6 @@ from pathlib import Path
 
 from rocket import run_msa_score
 
-PRESET = "model_1_ptm"
-
 
 def main():
     parser = argparse.ArgumentParser(

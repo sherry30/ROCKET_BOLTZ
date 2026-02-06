@@ -15,6 +15,9 @@ from rocket import refinement_utils as rkrf_utils
 from rocket import utils as rk_utils
 
 
+PRESET = "model_1_ptm"
+
+
 def run_msa_score(
     path: str | Path,
     system: str,
