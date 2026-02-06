@@ -14,6 +14,7 @@ from rocket.msacluster_utils import (
     write_fasta,
 )
 
+
 def run_msa_cluster(
     keyword: str,
     input_path: str,
@@ -31,17 +32,21 @@ def run_msa_cluster(
     run_tsne: bool = False,
 ) -> str:
     """
-    Cluster sequences in a MSA using DBSCAN algorithm and write .a3m file for each cluster.
+    Cluster sequences in a MSA using DBSCAN algorithm and write .a3m
+    file for each cluster.
 
     Args:
         keyword: Keyword to call all generated MSAs
-        input_path: fasta/a3m file of original alignment, or path containing fasta/a3m files
+        input_path: fasta/a3m file of original alignment, or path
+            containing fasta/a3m files
         output_dir: name of output directory to write MSAs to
         n_controls: Number of control msas to generate (default 10)
         verbose: Print cluster info as they are generated
         eps_val: Use single value for eps instead of scanning (default None = scan)
-        resample: If True, will resample the original MSA with replacement before writing
-        gap_cutoff: Remove sequences with gaps representing more than this frac of seq
+        resample: If True, will resample the original MSA with replacement
+            before writing
+        gap_cutoff: Remove sequences with gaps representing more than this
+            frac of seq
         min_eps: Min epsilon value to scan for DBSCAN
         max_eps: Max epsilon value to scan for DBSCAN
         eps_step: Step for epsilon scan for DBSCAN
@@ -192,9 +197,7 @@ def run_msa_cluster(
             outfile=str(Path(output_dir) / f"U10-{keyword}_{i:03d}.a3m"),
         )
     if len(df) > 100:
-        print(
-            f"writing {n_controls} size-100 uniformly sampled clusters", flush=True
-        )
+        print(f"writing {n_controls} size-100 uniformly sampled clusters", flush=True)
         for i in range(n_controls):
             tmp = df.sample(n=100)
             tmp = pd.concat([query_, tmp], axis=0)
@@ -223,11 +226,14 @@ def run_msa_cluster(
         # Create a simple namespace for plot_landscape compatibility
         class Args:
             pass
+
         args = Args()
         args.keyword = keyword
         args.o = output_dir
 
-        plot_landscape("PC 1", "PC 2", df, query_, "PCA", output_dir=output_dir, keyword=keyword)
+        plot_landscape(
+            "PC 1", "PC 2", df, query_, "PCA", output_dir=output_dir, keyword=keyword
+        )
 
         lprint("Saved PCA plot to " + str(Path(output_dir) / f"{keyword}_PCA.pdf"), f)
 
@@ -247,7 +253,15 @@ def run_msa_cluster(
         query_["TSNE 1"] = embedding[-1:, 0]
         query_["TSNE 2"] = embedding[-1:, 1]
 
-        plot_landscape("TSNE 1", "TSNE 2", df, query_, "TSNE", output_dir=output_dir, keyword=keyword)
+        plot_landscape(
+            "TSNE 1",
+            "TSNE 2",
+            df,
+            query_,
+            "TSNE",
+            output_dir=output_dir,
+            keyword=keyword,
+        )
 
         lprint("Saved TSNE plot to " + str(Path(output_dir) / f"{keyword}_TSNE.pdf"), f)
 

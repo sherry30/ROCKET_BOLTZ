@@ -77,12 +77,11 @@ def main():
     )
     config = parser.parse_args()
 
-
-    msa_input_prefix=config.i
-    output_dir_name=config.o
+    msa_input_prefix = config.i
+    output_dir_name = config.o
 
     msa_input_dir = Path(config.path) / msa_input_prefix
-    output_dir = Path(config.path) /output_dir_name
+    output_dir = Path(config.path) / output_dir_name
 
     run_msa_score(
         path=config.path,

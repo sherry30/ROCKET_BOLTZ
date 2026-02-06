@@ -14,7 +14,6 @@ from rocket import coordinates as rk_coordinates
 from rocket import refinement_utils as rkrf_utils
 from rocket import utils as rk_utils
 
-
 PRESET = "model_1_ptm"
 
 
@@ -148,9 +147,7 @@ def run_msa_score(
     af_bias.freeze()
 
     fasta_candidates = [
-        str(p)
-        for ext in ("*.fa", "*.fasta")
-        for p in Path(path).glob(ext)
+        str(p) for ext in ("*.fa", "*.fasta") for p in Path(path).glob(ext)
     ]
     fasta_path = fasta_candidates[0]
 
@@ -273,7 +270,9 @@ def run_msa_score(
 
     # --- Score all MSAs ---
     msa_dir = Path(msa_input_dir)
-    a3m_paths = sorted([str(p) for p in msa_dir.glob("*.a3m")]) if msa_dir.is_dir() else []
+    a3m_paths = (
+        sorted([str(p) for p in msa_dir.glob("*.a3m")]) if msa_dir.is_dir() else []
+    )
     print(f"{len(a3m_paths)} msa files available...", flush=True)
 
     for a3m_path in tqdm(a3m_paths):
@@ -387,4 +386,3 @@ def run_msa_score(
         shutil.rmtree(str(temp_alignment_dir))
 
     return str(output_directory_path)
-
