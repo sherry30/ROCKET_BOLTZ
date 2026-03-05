@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "Refining Openfold predictions with Crystallographic Likelihood Targets"
 readme = "README.md" # Assuming you have a README.md, otherwise adjust or remove
 requires-python = ">=3.10" # Specify your minimum supported Python version, adjust if needed
-license = { file = "LICENSE" } 
+license = { file = "LICENSE" }
 authors = [
     { name = "Alisia Fadini", email = "af3659@cumc.columbia.edu" },
     { name = "Minhuan Li", email = "minhuanli@flatironinstitute.org" }]
@@ -32,6 +32,7 @@ dependencies = [
     "scikit-learn",
     "seaborn",
     "mdtraj",
+    "biopython"
 ]
 
 [project.optional-dependencies]

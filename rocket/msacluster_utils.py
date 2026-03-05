@@ -83,7 +83,7 @@ def consensusVoting(seqs):
     return consensus
 
 
-def plot_landscape(x, y, df, query_, plot_type, args):
+def plot_landscape(x, y, df, query_, plot_type, output_dir, keyword):
     plt.figure(figsize=(5, 5))
     tmp = df.loc[df.dbscan_label == -1]
     plt.scatter(tmp[x], tmp[y], color="lightgray", marker="x", label="unclustered")
@@ -104,5 +104,5 @@ def plot_landscape(x, y, df, query_, plot_type, args):
     plt.tight_layout()
 
     plt.savefig(
-        args.o + "/" + args.keyword + "_" + plot_type + ".pdf", bbox_inches="tight"
+        output_dir + "/" + keyword + "_" + plot_type + ".pdf", bbox_inches="tight"
     )
