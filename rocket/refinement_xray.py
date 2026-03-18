@@ -223,6 +223,10 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
         elif os.path.isdir(a3m_path):
             alignment_dir = a3m_path
             tmp_align = False
+        elif not os.path.exists(a3m_path):
+            raise FileNotFoundError(a3m_path)
+        else:
+            raise ValueError(a3m_path)
         data_processor = data_pipeline.DataPipeline(template_featurizer=None)
         feature_dict = rkrf_utils.generate_feature_dict(
             fasta_path,
