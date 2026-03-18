@@ -276,9 +276,10 @@ def dock_into_data(
         )
         docking_cmd = ["phenix.python", docking_script]
 
-        map_args = (
-            [f"--map={map_file}"] if map_file else [f"--map1={map1}", f"--map2={map2}"]
-        )
+        if map_file is not None:
+            map_args = [f"--map={map_file}"]
+        else:
+            map_args = [f"--map1={map1}", f"--map2={map2}"]
 
         if predocked_model:
             docking_cmd += [
