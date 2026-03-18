@@ -225,6 +225,7 @@ def dock_into_data(
     output_dir,
     predicted_model,
     predocked_model,
+    map_file,
     map1,
     map2,
     fixed_model=None,
@@ -275,8 +276,16 @@ def dock_into_data(
         )
         docking_cmd = ["phenix.python", docking_script]
 
+        map_args = (
+            [f"--map={map_file}"] if map_file else [f"--map1={map1}", f"--map2={map2}"]
+        )
+
         if predocked_model:
-            docking_cmd += [map1, map2, predocked_model, resolution]
+            docking_cmd += [
+                f"--d_min={resolution}",
+                f"--working_model={predocked_model}",
+            ]
+            docking_cmd += map_args
             if fixed_model:
                 docking_cmd.append(f"--fixed_model={fixed_model}")
         else:
@@ -284,11 +293,10 @@ def dock_into_data(
                 f"--d_min={resolution}",
                 f"--output_folder={docking_output_dir}",
                 f"--model_file={predicted_model}",
-                f"--map1={map1}",
-                f"--map2={map2}",
                 f"--sequence_composition={fasta_composition}",
                 "--level=logfile",
             ]
+            docking_cmd += map_args
             if fixed_model:
                 docking_cmd.append(f"--fixed_model={fixed_model}")
 
@@ -407,6 +415,7 @@ def parse_args():
     parser.add_argument("--jax_params_path", default=None)
     parser.add_argument("--predocked_model", default=None)
     parser.add_argument("--fixed_model", default=None)
+    parser.add_argument("--map", default=None)
     parser.add_argument("--map1", default=None)
     parser.add_argument("--map2", default=None)
     parser.add_argument("--full_composition", default=None)
@@ -414,12 +423,15 @@ def parse_args():
     args = parser.parse_args()
 
     if args.method == "cryoem":
-        missing = [
-            arg for arg in ["map1", "map2", "resolution"] if getattr(args, arg) is None
-        ]
+        missing = [arg for arg in ["resolution"] if getattr(args, arg) is None]
         if missing:
             parser.error(
                 f"The following arguments are required for 'cryoem' method: {', '.join(missing)}"  # noqa: E501
+            )
+
+        if args.map is None and (args.map1 is None or args.map2 is None):
+            parser.error(
+                "For 'cryoem', provide either --map, or both --map1 and --map2."
             )
 
         # Require full_composition only if predocked_model is not provided
@@ -455,6 +467,7 @@ def cli_runpreprocess():
         args.output_dir,
         predicted_model,
         args.predocked_model,
+        args.map,
         args.map1,
         args.map2,
         args.fixed_model,
