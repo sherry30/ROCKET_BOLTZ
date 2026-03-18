@@ -423,12 +423,27 @@ def parse_args():
     args = parser.parse_args()
 
     if args.method == "cryoem":
+        # Validate required arguments specific to cryo-EM runs.
         missing = [arg for arg in ["resolution"] if getattr(args, arg) is None]
         if missing:
             parser.error(
                 f"The following arguments are required for 'cryoem' method: {', '.join(missing)}"  # noqa: E501
             )
 
+        # Reject empty-string values for map arguments early, as they are
+        # almost certainly misconfigurations and can hide errors.
+        for map_arg in ("map", "map1", "map2"):
+            value = getattr(args, map_arg)
+            if value == "":
+                parser.error(f"--{map_arg} must not be an empty string.")
+
+        # Enforce mutual exclusivity between --map and --map1/--map2.
+        if args.map is not None and (args.map1 is not None or args.map2 is not None):
+            parser.error(
+                "For 'cryoem', use either --map, or the pair --map1 and --map2, but not both."  # noqa: E501
+            )
+
+        # Require either a single map or a pair of maps.
         if args.map is None and (args.map1 is None or args.map2 is None):
             parser.error(
                 "For 'cryoem', provide either --map, or both --map1 and --map2."
