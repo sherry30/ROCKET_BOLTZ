@@ -179,7 +179,6 @@ def pose_train_lbfgs_quat(
             num_batch=1,
             sub_ratio=1.0,
             solvent=False,
-            return_Rfactors=False,
             added_chain_HKL=added_chain_HKL,
             added_chain_asu=added_chain_asu,
         )
@@ -238,7 +237,6 @@ def pose_train_adam_quat(
             num_batch=1,
             sub_ratio=1.0,
             solvent=False,
-            return_Rfactors=False,
             added_chain_HKL=added_chain_HKL,
             added_chain_asu=added_chain_asu,
         )
@@ -283,7 +281,6 @@ def pose_train_adam_matrix(
             temp_model,
             bin_labels=None,
             num_batch=1,
-            return_Rfactors=False,
             sub_ratio=1.0,
             solvent=False,
             added_chain=added_chain,
@@ -325,7 +322,6 @@ def pose_train_lbfgs(
         loss = -llgloss(
             temp_model,
             bin_labels=None,
-            return_Rfactors=False,
             num_batch=1,
             sub_ratio=1.0,
         )
