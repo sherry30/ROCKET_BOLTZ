@@ -18,6 +18,7 @@ from rocket import coordinates as rk_coordinates
 from rocket import refinement_utils as rkrf_utils
 from rocket import utils as rk_utils
 from rocket.refinement_config import RocketRefinmentConfig
+from rocket.wandb_logger import WandbLogger
 from rocket.xtal import structurefactors as llg_sf
 
 PRESET = "model_1_ptm"
@@ -68,6 +69,17 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
         f"System: {config.file_id}, run ID: {refinement_run_uuid!s}, Note: {config.note}",  # noqa: E501
         flush=True,
     )
+
+    wandb_logger = WandbLogger(
+        enabled=config.use_wandb,
+        project=config.wandb_project,
+        entity=config.wandb_entity,
+        name=config.wandb_name,
+        tags=config.wandb_tags,
+        notes=config.wandb_notes,
+        config=config.model_dump(),
+    )
+
     if not config.verbose:
         warnings.filterwarnings("ignore")
 
@@ -412,6 +424,9 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
         # PDB if HDF5 support isn't available. Import mdtraj lazily so the
         # rest of the code still runs if mdtraj isn't installed.
         traj_writer = None
+        traj_path_pdb = os.path.join(
+            output_directory_path, f"{run_id}_refinement_trajectory.pdb"
+        )
         md = None
         mdtraj_template = None
         try:
@@ -421,9 +436,6 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
                 from mdtraj.formats import PDBTrajectoryFile  # type: ignore
             except Exception:
                 PDBTrajectoryFile = None  # type: ignore
-            traj_path_pdb = (
-                f"{output_directory_path!s}/{run_id}_refinement_trajectory.pdb"
-            )
             mdtraj_template = md.load_pdb(input_pdb)
             if PDBTrajectoryFile is not None:
                 traj_writer = PDBTrajectoryFile(traj_path_pdb, mode="w")
@@ -612,24 +624,47 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
             # Save postRBR frame: either append to a single PDB trajectory using
             # MDTraj if available, or fall back to writing one PDB per iteration.
             if traj_writer is not None:
-                coords_nm = optimized_xyz.detach().cpu().numpy().reshape(-1, 3) / 10.0
+                coords_angstrom = optimized_xyz.detach().cpu().numpy().reshape(-1, 3)
                 traj_writer.write(
-                    coords_nm, mdtraj_template.topology, modelIndex=iteration
+                    coords_angstrom, mdtraj_template.topology, modelIndex=iteration
                 )
                 # Flush the underlying file handle to write data immediately
                 if hasattr(traj_writer, "_file") and hasattr(
                     traj_writer._file, "flush"
                 ):
                     traj_writer._file.flush()
+                wandb_logger.log_structure_frame(
+                    optimized_xyz,
+                    topology_path=input_pdb,
+                    name=f"trajectory_{run_id}_live",
+                    step=iteration,
+                )
             else:
                 pdb_path = f"{output_directory_path!s}/{run_id}_{iteration}_postRBR.pdb"
                 llgloss.sfc.savePDB(pdb_path)
+                wandb_logger.log_molecule_3d(
+                    pdb_path,
+                    name=f"trajectory_{run_id}_live",
+                    step=iteration,
+                )
 
             progress_bar.set_postfix(
                 NEG_LLG=f"{llg_estimate:.2f}",
                 r_feff_work=f"{r_work.item():.3f}",
                 r_feff_free=f"{r_free.item():.3f}",
                 memory=f"{torch.cuda.max_memory_allocated() / 1024**3:.1f}G",
+            )
+
+            wandb_logger.log(
+                {
+                    f"{run_id}/neg_llg": llg_estimate,
+                    f"{run_id}/rwork": r_work.item(),
+                    f"{run_id}/rfree": r_free.item(),
+                    f"{run_id}/mean_plddt": float(np.mean(plddts_res)),
+                    f"{run_id}/gpu_mem_gb": torch.cuda.max_memory_allocated() / 1024**3,
+                    f"{run_id}/iter_sec": time.time() - start_time,
+                },
+                step=iteration,
             )
 
             # if config.alignment_mode == "B":
@@ -715,6 +750,13 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
                 traj_writer.close()
         except Exception:
             pass
+        if os.path.exists(traj_path_pdb):
+            wandb_logger.log_artifact(
+                traj_path_pdb,
+                name=f"trajectory_{run_id}",
+                artifact_type="trajectory",
+            )
+            wandb_logger.log_trajectory_3d(traj_path_pdb, max_frames=50)
         # Average plddt per iteration
         np.save(
             f"{output_directory_path!s}/mean_it_plddt_{run_id}.npy",
@@ -788,6 +830,7 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
 
     # Save best model as a single PDB (preserve input_pdb topology)
     try:
+        best_name = None
         if best_pos is not None:
             # best_pos is in Å, set it on the llgloss.sfc object and save
             try:
@@ -814,5 +857,17 @@ def run_xray_refinement(config: RocketRefinmentConfig | str) -> RocketRefinmentC
     except NameError:
         # best_pos not defined; nothing to save
         pass
+
+    config_path = f"{output_directory_path!s}/config.yaml"
+    wandb_logger.log({
+        "summary/best_neg_llg": best_llg,
+        "summary/best_run": best_run,
+        "summary/best_iter": best_iter,
+    })
+    if best_name is not None:
+        wandb_logger.log_artifact(best_name, name="best_model", artifact_type="model")
+        wandb_logger.log_molecule_3d(best_name, name="best_model_3d")
+    wandb_logger.log_artifact(config_path, name="config", artifact_type="config")
+    wandb_logger.finish()
 
     return config

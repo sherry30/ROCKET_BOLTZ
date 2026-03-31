@@ -42,6 +42,10 @@ tests = [
     "pytest-xdist",
 ]
 
+wandb = [
+    "wandb>=0.22.0",
+]
+
 CI = [
     "ruff",
     "pre-commit",

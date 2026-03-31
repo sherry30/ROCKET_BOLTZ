@@ -122,6 +122,15 @@ class AlphaFoldConfig(BaseModel):
     use_deepspeed_evo_attention: bool = True  # Default to True
 
 
+class MonitoringConfig(BaseModel):
+    use_wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    wandb_name: str | None = None
+    wandb_tags: list[str] | None = None
+    wandb_notes: str | None = None
+
+
 # Main configuration class
 class RocketRefinmentConfig(BaseModel):
     # Metadata
@@ -133,6 +142,7 @@ class RocketRefinmentConfig(BaseModel):
     algorithm: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     alphafold: AlphaFoldConfig = Field(default_factory=AlphaFoldConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
     model_config = {"use_enum_values": True}
 
@@ -156,6 +166,13 @@ class RocketRefinmentConfig(BaseModel):
         "verbose": "execution.verbose",
         # AlphaFold
         "use_deepspeed_evo_attention": "alphafold.use_deepspeed_evo_attention",
+        # Monitoring
+        "use_wandb": "monitoring.use_wandb",
+        "wandb_project": "monitoring.wandb_project",
+        "wandb_entity": "monitoring.wandb_entity",
+        "wandb_name": "monitoring.wandb_name",
+        "wandb_tags": "monitoring.wandb_tags",
+        "wandb_notes": "monitoring.wandb_notes",
         # Algorithm
         "bias_version": "algorithm.bias_version",
         "iterations": "algorithm.iterations",
@@ -215,7 +232,15 @@ class RocketRefinmentConfig(BaseModel):
         # Create an ordered dictionary with the desired field order
         ordered_dict = {}
         # Define the order of top-level fields
-        field_order = ["note", "data", "paths", "execution", "algorithm"]
+        field_order = [
+            "note",
+            "data",
+            "paths",
+            "execution",
+            "algorithm",
+            "alphafold",
+            "monitoring",
+        ]
 
         # Add fields in the specified order
         for field in field_order:
@@ -270,6 +295,7 @@ class RocketRefinmentConfig(BaseModel):
             "execution": {},
             "algorithm": {"optimization": {}, "features": {}},
             "data": {},
+            "monitoring": {},
             "note": flat_dict.get("note", ""),
         }
 
