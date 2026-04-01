@@ -503,7 +503,17 @@ def cli_runpreprocess():
     phase1_config.algorithm.init_recycling = args.max_recycling_iters
 
     # Use smaller learning rates for low-resolution cryoEM data (> 5 Å)
-    if args.method == "cryoem" and float(args.resolution) > 5.0:
+    resolution_value = None
+    if args.resolution is not None:
+        try:
+            resolution_value = float(args.resolution)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid resolution value '{}' provided; skipping resolution-based "
+                "learning rate adjustment.",
+                args.resolution,
+            )
+    if args.method == "cryoem" and resolution_value is not None and resolution_value > 5.0:
         logger.info(
             f"Low-resolution cryoEM ({args.resolution} Å): setting lr_a=1e-4, lr_m=1e-3"
         )
