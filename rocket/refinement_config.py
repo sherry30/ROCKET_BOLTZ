@@ -59,7 +59,7 @@ class OptimizationParams(BaseModel):
     rbr_opt_algorithm: str = "lbfgs"
     rbr_lbfgs_learning_rate: float = 150.0
     smooth_stage_epochs: int | None = 50
-    phase2_final_lr: float = 1e-3
+    phase2_final_lr: float = 1e-4
     l2_weight: float = 1e-7
 
 
@@ -380,7 +380,7 @@ def gen_config_phase1(
                 additive_learning_rate=0.05,
                 multiplicative_learning_rate=1.0,
                 l2_weight=1e-7,
-                phase2_final_lr=1e-3,
+                phase2_final_lr=1e-4,
                 smooth_stage_epochs=50,
             ),
         ),
