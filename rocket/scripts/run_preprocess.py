@@ -513,7 +513,12 @@ def cli_runpreprocess():
                 "learning rate adjustment.",
                 args.resolution,
             )
-    if args.method == "cryoem" and resolution_value is not None and resolution_value > 5.0:
+    is_low_res_cryoem = (
+        args.method == "cryoem"
+        and resolution_value is not None
+        and resolution_value > 5.0
+    )
+    if is_low_res_cryoem:
         logger.info(
             f"Low-resolution cryoEM ({args.resolution} Å): setting lr_a=1e-4, lr_m=1e-3"
         )
