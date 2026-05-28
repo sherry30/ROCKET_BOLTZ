@@ -247,6 +247,40 @@ Phase-2 config differences vs Phase-1:
 
 ---
 
+## Optimization details
+
+### LR scheduling (smooth stage)
+
+Phase 1 applies the same smooth-stage LR decay as AF2-ROCKET: the last
+`smooth_stage_epochs` (default 50) iterations decay the learning rate from
+`lr_m/lr_a = 0.001` down to `phase2_final_lr = 0.0001`.  This prevents Adam
+from diverging after the optimum is found (without decay, Adam momentum keeps
+pushing the structure ~13–17 Å away from the best solution).
+
+### Seed pre-scan
+
+Before the main optimisation loops, `refinement_boltz2.py` scans
+`max(num_of_runs × 3, 6)` diffusion seeds with an identity bias (no gradient).
+It selects the `num_of_runs` seeds that give the highest initial LLG and uses
+those for the optimisation runs.  This matters because seed-to-seed LLG variance
+(~370 units with identity bias) exceeds the optimisation signal (~150 units of
+genuine improvement), so starting from the best seeds is critical.
+
+Scan results are saved to `{out_dir}/seed_scan.npy` as `(LLG, seed)` pairs.
+
+### Rwork interpretation
+
+ROCKET's Rwork formula uses complex Fcalc vs real FEFF with DOBS² weighting:
+
+```
+R = Σ DOBS² |FEFF − Fc_complex| / Σ DOBS² FEFF
+```
+
+This encodes **both amplitude and phase error**.  Random model → R ≈ 1.41.
+Perfect model → R ≈ 0.  A starting model with R ≈ 1.27 corresponds to ~78°
+average phase error, which is a plausible starting point for Phaser MR + Boltz-2.
+This is NOT the same as conventional crystallographic Rwork (random ≈ 0.83).
+
 ## Python API
 
 ```python

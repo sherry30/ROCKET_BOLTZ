@@ -235,14 +235,68 @@ def run_boltz2_xray_refinement(
 
     cra_name = sfc.cra_name  # list of "chain-resid-resname-atomname"
 
-    for n in range(config.num_of_runs):
+    # ------------------------------------------------------------------
+    # Pre-scan: pick the best diffusion seeds before committing to long runs.
+    #
+    # Different seeds produce very different initial structures (LLG variance
+    # ~300-400 units even with an identity bias), which far exceeds the
+    # optimization signal.  Scanning 3x num_of_runs seeds and taking the best
+    # ones ensures we start from the highest-quality Boltz-2 trajectories.
+    # ------------------------------------------------------------------
+    n_scan = max(config.num_of_runs * 3, 6)
+    logger.info(f"Seed pre-scan: evaluating {n_scan} seeds with identity bias …")
+    _scan_bias = wrapper.init_bias(device)   # identity init — not used for grad
+    scan_llg_by_seed: list[tuple[float, int]] = []
+
+    for seed in range(n_scan):
+        wrapper.diffusion_seed = seed
+
+        # Only the model forward pass is wrapped in no_grad (saves memory; no
+        # bias gradient needed).  SFC scale/sigmaA optimisations run their own
+        # internal backward() calls and must NOT be inside no_grad.
+        with torch.no_grad():
+            model_scan = wrapper(feats_gpu, recycling_steps=n_recycling,
+                                  num_sampling_steps=n_sampling)
+            xyz_scan, _, pseudo_Bs_scan = position_alignment_boltz2(
+                model_output=model_scan, feats=feats_gpu,
+                cra_name_sfc=cra_name, best_pos=reference_pos,
+            )
+
+        xyz_scan_d = xyz_scan.detach()
+        safe_b_scan = pseudo_Bs_scan.detach().clamp(max=200.0)
+        llgloss.sfc.atom_b_iso = safe_b_scan
+        llgloss_rbr.sfc.atom_b_iso = safe_b_scan
+        rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_scan_d)
+        opt_xyz_scan, _ = rk_coordinates.rigidbody_refine_quat(
+            xyz_scan_d, llgloss_rbr, cra_name,
+            domain_segs=config.domain_segs,
+            lbfgs=RBR_LBFGS,
+            added_chain_HKL=constant_fp_added_HKL,
+            added_chain_asu=constant_fp_added_asu,
+            lbfgs_lr=config.rbr_lbfgs_learning_rate,
+            verbose=False,
+        )
+        llg_scan, _, _ = llgloss(
+            opt_xyz_scan, sub_ratio=1.0, solvent=config.solvent,
+            update_scales=config.sfc_scale,
+            added_chain_HKL=constant_fp_added_HKL,
+            added_chain_asu=constant_fp_added_asu,
+            return_Rfactors=True,
+        )
+        scan_llg_by_seed.append((llg_scan.item(), seed))
+        logger.info(f"  seed {seed}: LLG={llg_scan.item():.1f}")
+
+    # Select the top num_of_runs seeds (highest LLG = best)
+    scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
+    selected_seeds = [seed for _, seed in scan_llg_by_seed[: config.num_of_runs]]
+    logger.info(f"Selected seeds: {selected_seeds}  (scan results: {scan_llg_by_seed})")
+    np.save(f"{out_dir}/seed_scan.npy", np.array(scan_llg_by_seed))
+
+    for n, seed in enumerate(selected_seeds):
         run_id = rkrf_utils.number_to_letter(n)
 
-        # Fix diffusion seed for this run so every gradient step within the run
-        # samples the same noise trajectory.  Diversity across runs comes from
-        # different seeds.  Without a fixed seed the diffusion is re-sampled at
-        # every iteration, making the gradient too noisy for the optimizer to learn.
-        wrapper.diffusion_seed = n
+        # Use the pre-selected best seed for this run
+        wrapper.diffusion_seed = seed
 
         # -- bias initialisation (phase2: warm-start from phase1 best bias) --
         # bias_dict = wrapper.init_bias(n_tokens, device)
@@ -266,6 +320,19 @@ def run_boltz2_xray_refinement(
             ],
             weight_decay=config.weight_decay if config.weight_decay else 0.0,
         )
+
+        # Smooth LR decay over the final smooth_stage_epochs iterations of phase 1
+        # (mirrors the AF2 refinement schedule; prevents Adam divergence after the optimum)
+        lr_a_current = lr_a
+        lr_m_current = lr_m
+        w_L2_current = w_L2
+        smooth_stage_epochs = config.smooth_stage_epochs
+        if ("phase1" in config.note) and (smooth_stage_epochs is not None):
+            lr_stage1_final = config.phase2_final_lr
+            decay_rate_a = (lr_stage1_final / lr_a) ** (1.0 / smooth_stage_epochs)
+            decay_rate_m = (lr_stage1_final / lr_m) ** (1.0 / smooth_stage_epochs)
+        else:
+            decay_rate_a = decay_rate_m = 1.0
 
         # per-run tracking
         llg_losses     = []
@@ -412,12 +479,12 @@ def run_boltz2_xray_refinement(
                 step=iteration,
             )
 
-            # Total loss and backward
-            if w_L2 > 0.0:
+            # Total loss and backward (use w_L2_current so L2 also decays in smooth stage)
+            if w_L2_current > 0.0:
                 L2_loss = torch.sum(
                     bfactor_weights.unsqueeze(-1) * (optimized_xyz - reference_pos) ** 2
                 )
-                loss = L_llg + w_L2 * L2_loss + config.w_plddt * L_plddt
+                loss = L_llg + w_L2_current * L2_loss + config.w_plddt * L_plddt
             else:
                 loss = L_llg + config.w_plddt * L_plddt
                 if early_stopper.early_stop(loss.item()):
@@ -426,6 +493,16 @@ def run_boltz2_xray_refinement(
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_([w_pair, b_pair], max_norm=10.0)
+
+            # Apply smooth LR decay in the final smooth_stage_epochs iterations
+            if ("phase1" in config.note) and (smooth_stage_epochs is not None):
+                if iteration > (config.iterations - smooth_stage_epochs):
+                    lr_a_current = lr_a * (decay_rate_a ** iteration)
+                    lr_m_current = lr_m * (decay_rate_m ** iteration)
+                    w_L2_current = w_L2 * (1.0 - iteration / smooth_stage_epochs)
+                    optimizer.param_groups[0]["lr"] = lr_m_current
+                    optimizer.param_groups[1]["lr"] = lr_a_current
+
             optimizer.step()
 
             time_by_epoch.append(time.time() - start_time)
