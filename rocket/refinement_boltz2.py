@@ -245,7 +245,8 @@ def run_boltz2_xray_refinement(
         wrapper.diffusion_seed = n
 
         # -- bias initialisation (phase2: warm-start from phase1 best bias) --
-        bias_dict = wrapper.init_bias(n_tokens, device)
+        # bias_dict = wrapper.init_bias(n_tokens, device)
+        bias_dict = wrapper.init_bias(device)
         w_pair = bias_dict["w_pair"]
         b_pair = bias_dict["b_pair"]
 
@@ -424,6 +425,7 @@ def run_boltz2_xray_refinement(
                     break
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_([w_pair, b_pair], max_norm=10.0)
             optimizer.step()
 
             time_by_epoch.append(time.time() - start_time)

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.utils.checkpoint as checkpoint
 import torch.nn as nn
 from einops import rearrange
 from loguru import logger
@@ -137,16 +138,29 @@ class Boltz2PairBias(nn.Module):
     # Public helpers
     # ------------------------------------------------------------------
 
-    def init_bias(self, n_tokens: int, device: str | torch.device) -> dict[str, Tensor]:
-        """
-        Create (or reset) the multiplicative/additive pair-bias tensors.
+    # def init_bias(self, n_tokens: int, device: str | torch.device) -> dict[str, Tensor]:
+    #     """
+    #     Create (or reset) the multiplicative/additive pair-bias tensors.
 
-        Returns a dict with keys ``'w_pair'`` and ``'b_pair'`` as leaf tensors
-        with requires_grad=True.  Pass them to your Adam optimizer.
+    #     Returns a dict with keys ``'w_pair'`` and ``'b_pair'`` as leaf tensors
+    #     with requires_grad=True.  Pass them to your Adam optimizer.
+    #     """
+    #     shape = (1, n_tokens, n_tokens, self._token_z)
+    #     w = torch.ones(shape, device=device, requires_grad=True)
+    #     b = torch.zeros(shape, device=device, requires_grad=True)
+    #     self._bias = {"w_pair": w, "b_pair": b}
+    #     return self._bias
+
+    def init_bias(self, device: str | torch.device) -> dict[str, Tensor]:
         """
-        shape = (1, n_tokens, n_tokens, self._token_z)
-        w = torch.ones(shape, device=device, requires_grad=True)
-        b = torch.zeros(shape, device=device, requires_grad=True)
+        Create channel-wise affine transform matrices.
+        Independent of protein length (N), matching ConforNets.
+        """
+        # self._token_z is 128. Shape: [128, 128]
+        w = torch.eye(self._token_z, device=device, requires_grad=True)
+        # Shape: [128]
+        b = torch.zeros(self._token_z, device=device, requires_grad=True)
+        
         self._bias = {"w_pair": w, "b_pair": b}
         return self._bias
 
@@ -267,6 +281,54 @@ class Boltz2PairBias(nn.Module):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # def _run_trunk(
+    #     self,
+    #     feats: dict[str, Tensor],
+    #     recycling_steps: int,
+    #     w_pair: Tensor,
+    #     b_pair: Tensor,
+    # ) -> tuple[Tensor, Tensor]:
+    #     """Run the Boltz-2 trunk with pair bias on the final recycling output."""
+    #     model = self._boltz
+
+    #     s_inputs = model.input_embedder(feats)
+    #     s_init = model.s_init(s_inputs)
+    #     z_init = (
+    #         model.z_init_1(s_inputs)[:, :, None]
+    #         + model.z_init_2(s_inputs)[:, None, :]
+    #     )
+    #     relative_position_encoding = model.rel_pos(feats)
+    #     z_init = z_init + relative_position_encoding
+    #     z_init = z_init + model.token_bonds(feats["token_bonds"].float())
+    #     z_init = z_init + model.contact_conditioning(feats)
+
+    #     mask = feats["token_pad_mask"].float()
+    #     pair_mask = mask[:, :, None] * mask[:, None, :]
+
+    #     s = torch.zeros_like(s_init)
+    #     z = torch.zeros_like(z_init)
+
+    #     for i in range(recycling_steps + 1):
+    #         is_last = i == recycling_steps
+    #         # Only keep gradient graph on the final recycling iteration
+    #         ctx = torch.enable_grad() if is_last else torch.no_grad()
+
+    #         with ctx:
+    #             s = s_init + model.s_recycle(model.s_norm(s.detach() if not is_last else s))
+    #             z = z_init + model.z_recycle(model.z_norm(z.detach() if not is_last else z))
+
+    #             if model.use_templates:
+    #                 z = z + model.template_module(z, feats, pair_mask, use_kernels=False)
+
+    #             z = z + model.msa_module(z, s_inputs, feats, use_kernels=False)
+    #             s, z = model.pairformer_module(s, z, mask=mask, pair_mask=pair_mask, use_kernels=False)
+
+    #     # Apply pair bias AFTER trunk, before diffusion conditioning
+    #     # z shape: [B, N, N, token_z]
+
+    #     z_biased = w_pair * z + b_pair
+    #     return s, z_biased
+
     def _run_trunk(
         self,
         feats: dict[str, Tensor],
@@ -274,9 +336,11 @@ class Boltz2PairBias(nn.Module):
         w_pair: Tensor,
         b_pair: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Run the Boltz-2 trunk with pair bias on the final recycling output."""
+        """Run the Boltz-2 trunk with ConforNets channel-wise pre-Pairformer bias."""
+
         model = self._boltz
 
+        # Standard Boltz-2 Latent Initialization
         s_inputs = model.input_embedder(feats)
         s_init = model.s_init(s_inputs)
         z_init = (
@@ -291,32 +355,56 @@ class Boltz2PairBias(nn.Module):
         mask = feats["token_pad_mask"].float()
         pair_mask = mask[:, :, None] * mask[:, None, :]
 
-        # truncated backprop: apply pair bias to the trunk output BEFORE recycling
-        z_init = w_pair * z_init + b_pair
-
         s = torch.zeros_like(s_init)
         z = torch.zeros_like(z_init)
 
+        # Recycling Loop
         for i in range(recycling_steps + 1):
             is_last = i == recycling_steps
-            # Only keep gradient graph on the final recycling iteration
+            # Enable gradients ONLY on the final recycling pass
             ctx = torch.enable_grad() if is_last else torch.no_grad()
 
             with ctx:
-                s = s_init + model.s_recycle(model.s_norm(s.detach() if not is_last else s))
-                z = z_init + model.z_recycle(model.z_norm(z.detach() if not is_last else z))
+                s_in = s.detach() if not is_last else s
+                z_in = z.detach() if not is_last else z
+
+                s = s_init + model.s_recycle(model.s_norm(s_in))
+                z = z_init + model.z_recycle(model.z_norm(z_in))
 
                 if model.use_templates:
                     z = z + model.template_module(z, feats, pair_mask, use_kernels=False)
 
                 z = z + model.msa_module(z, s_inputs, feats, use_kernels=False)
-                s, z = model.pairformer_module(s, z, mask=mask, pair_mask=pair_mask, use_kernels=False)
 
-        # Apply pair bias AFTER trunk, before diffusion conditioning
-        # z shape: [B, N, N, token_z]
+                # --- CONFORNETS CRITICAL INJECTION POINT ---
+                if is_last:
+                    # 1. Apply the channel-wise transform right before the Pairformer blocks
+                    # z shape: [B, N, N, 128] @ w_pair shape: [128, 128] -> [B, N, N, 128]
+                    z = torch.matmul(z, w_pair) + b_pair
 
-        # z_biased = w_pair * z + b_pair
-        # return s, z_biased
+                    # 2. Replicate chunk size logic from PairformerModule code
+                    chunk_size_tri_attn = 128 if z.shape[1] > 512 else 512
+
+                    # 3. Step-by-block fine-grained activation checkpointing
+                    # This completely bypasses the 'if self.training' block check in Boltz-2 source code
+                    for layer in model.pairformer_module.layers:
+                        # Default-argument captures `layer` by value, avoiding Python's
+                        # late-binding closure semantics.  Without this, during backward
+                        # recompute all run_block closures would reference the last layer,
+                        # producing completely wrong gradients.
+                        def run_block(s_tensor, z_tensor, _layer=layer):
+                            return _layer(
+                                s_tensor,
+                                z_tensor,
+                                mask,
+                                pair_mask,
+                                chunk_size_tri_attn,
+                                False,
+                            )
+                        s, z = checkpoint.checkpoint(run_block, s, z, use_reentrant=False)
+                else:
+                    # Clean un-differentiable execution for early recycling passes
+                    s, z = model.pairformer_module(s, z, mask=mask, pair_mask=pair_mask, use_kernels=False)
 
         return s, z
 

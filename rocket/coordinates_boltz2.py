@@ -82,7 +82,8 @@ def extract_allatoms_boltz2(
     feats: dict[str, Tensor],
     cra_name_sfc: list[str],
     plddt_tokens: Optional[Tensor] = None,
-) -> tuple[Tensor, Optional[Tensor]]:
+    pbfactor_tokens: Optional[Tensor] = None,
+) -> tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
     """
     Extract atom coordinates from Boltz-2 output and reorder to match SFC.
 
@@ -107,12 +108,18 @@ def extract_allatoms_boltz2(
     plddt_tokens : Tensor [1, N_tokens] or None
         Per-token plddt in [0, 1] from the Boltz-2 confidence module.
         If provided, returns per-atom plddt in SFC ordering.
+    pbfactor_tokens : Tensor [1, N_tokens, num_bins] or None
+        Per-token B-factor histogram logits from Boltz-2's bfactor_module.
+        If provided, returns per-atom B-factors in Å² in SFC ordering.
 
     Returns
     -------
     positions : Tensor [n_sfc_atoms, 3]
     plddt_atom : Tensor [n_sfc_atoms] or None
         Per-atom plddt in [0, 1], or None if plddt_tokens was not provided.
+    bfactor_atom : Tensor [n_sfc_atoms] or None
+        Per-atom B-factor in Å² from Boltz-2's bfactor_module, or None if
+        pbfactor_tokens was not provided.
     """
     _boltz_available()
 
@@ -187,26 +194,33 @@ def extract_allatoms_boltz2(
         np.array(cra_name_boltz2)[reorder_index] == np.array(cra_name_sfc)
     ), "Topology mismatch between Boltz-2 and SFC after reordering!"
 
-    positions = valid_coords[
-        torch.tensor(reorder_index, dtype=torch.long, device=valid_coords.device)
-    ]
+    reorder_t = torch.tensor(reorder_index, dtype=torch.long, device=valid_coords.device)
+    positions = valid_coords[reorder_t]
 
     # --- optional per-atom plddt ---
     if plddt_tokens is not None:
         # plddt_tokens: [1, N_tokens], Boltz-2 range [0, 1]
         plddt_tok = plddt_tokens[b]  # [N_tokens]
-        # per-atom (all atoms, including pad)
         atom_plddt_all = plddt_tok[atom_to_token_idx]  # [N_atoms]
-        # filter to real atoms
         valid_plddt = atom_plddt_all[real_idx_tensor]  # [n_real]
-        # reorder
-        plddt_atom = valid_plddt[
-            torch.tensor(reorder_index, dtype=torch.long, device=valid_plddt.device)
-        ]
+        plddt_atom = valid_plddt[reorder_t]
     else:
         plddt_atom = None
 
-    return positions, plddt_atom
+    # --- optional per-atom B-factor from Boltz-2's bfactor_module ---
+    if pbfactor_tokens is not None:
+        # pbfactor_tokens: [1, N_tokens, num_bins] — histogram logits over [0, 100] Å²
+        pb_tok = pbfactor_tokens[b].float()  # [N_tokens, num_bins]
+        num_bins = pb_tok.shape[-1]
+        bin_centers = torch.linspace(0.0, 100.0, num_bins, device=pb_tok.device)
+        bfactor_tok = (torch.softmax(pb_tok, dim=-1) * bin_centers).sum(dim=-1)  # [N_tokens]
+        atom_bfactor_all = bfactor_tok[atom_to_token_idx]  # [N_atoms]
+        valid_bfactor = atom_bfactor_all[real_idx_tensor]  # [n_real]
+        bfactor_atom = valid_bfactor[reorder_t]
+    else:
+        bfactor_atom = None
+
+    return positions, plddt_atom, bfactor_atom
 
 
 # ---------------------------------------------------------------------------
@@ -252,22 +266,26 @@ def position_alignment_boltz2(
     plddt_per_token : Tensor [N_tokens]  (per-token, [0,1])
     pseudo_Bs : Tensor [n_atoms]         (detached pseudo-B factors, Å²)
     """
-    # plddt per-token: [1, N_tokens] or None
     plddt_tokens: Optional[Tensor] = model_output.get("plddt")
+    pbfactor_tokens: Optional[Tensor] = model_output.get("pbfactor")
 
-    xyz_orth_sfc, plddt_atom = extract_allatoms_boltz2(
+    xyz_orth_sfc, plddt_atom, bfactor_atom = extract_allatoms_boltz2(
         model_output["sample_atom_coords"],
         feats,
         cra_name_sfc,
         plddt_tokens=plddt_tokens,
+        pbfactor_tokens=pbfactor_tokens,
     )
 
-    # --- pseudo-B factors from plddt ---
-    if plddt_atom is not None:
+    # --- B-factors: prefer Boltz-2's direct prediction, fall back to pLDDT conversion ---
+    if bfactor_atom is not None:
+        # Boltz-2 bfactor_module: direct per-atom B in Å²
+        pseudo_Bs = bfactor_atom
+    elif plddt_atom is not None:
         # plddt_atom is in [0, 1]; plddt2pseudoB_pt expects [0, 100]
         pseudo_Bs = rk_utils.plddt2pseudoB_pt(plddt_atom * 100.0)
     else:
-        # Fall back to a uniform medium B if confidence was not run
+        # Fall back to a uniform medium B if neither prediction is available
         pseudo_Bs = torch.full(
             (xyz_orth_sfc.shape[0],), 30.0,
             dtype=xyz_orth_sfc.dtype, device=xyz_orth_sfc.device

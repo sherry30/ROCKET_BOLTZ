@@ -13,17 +13,26 @@ representation of the structure predictor, then optimises those parameters to
 maximise the fit of the predicted structure to X-ray diffraction data (measured
 by the Log-Likelihood Gain, LLG).
 
-For Boltz-2, the learnable bias acts on the trunk **pair representation z**:
+For Boltz-2, the learnable bias applies a **channel-wise affine transform** to
+the trunk pair representation z immediately **before** the PairFormer stack
+(inspired by ConForNets, arxiv 2604.18559):
 
 ```
-z_biased = w_pair ⊙ z  +  b_pair
+z  →  z @ w_pair + b_pair  →  PairFormer  →  z_out
 ```
 
-`w_pair` and `b_pair` are both `[1, N_tokens, N_tokens, 128]`.  They are
-initialised to ones and zeros respectively, so at iteration 0 the model
-produces its unmodified prediction.  Gradients flow back through K steps of
-reverse diffusion, through the diffusion conditioning module, through `z_biased`,
-and into `w_pair` and `b_pair`.
+- `w_pair`: `[128, 128]` — initialised to identity
+- `b_pair`: `[128]` — initialised to zeros
+
+Applied as `z [B, N, N, 128] @ w_pair [128, 128] + b_pair [128]` — the
+same linear transform is broadcast over all (i, j) positions.  At iteration 0
+the identity initialisation leaves the model prediction unchanged.
+
+This formulation is **length-independent**: `w_pair` and `b_pair` have
+`128² + 128 = 16,512` parameters regardless of protein size (vs. `2 × N² × 128`
+for the old per-position bias).  Activation checkpointing is applied to each
+PairFormer block so gradients flow through without storing all intermediate
+activations.
 
 Everything else — trunk weights, diffusion network weights, MSA module — is
 frozen.
@@ -36,7 +45,7 @@ frozen.
 |---|---|
 | `rocket/boltz2_wrapper.py` | `Boltz2PairBias` — injects the pair bias, runs the trunk recycling loop, implements truncated-backprop diffusion sampling |
 | `rocket/refinement_boltz2.py` | Full refinement loop + `prepare_boltz2_feats` helper |
-| `rocket/coordinates_boltz2.py` | Atom extraction from Boltz-2 output + Kabsch alignment |
+| `rocket/coordinates_boltz2.py` | Atom extraction from Boltz-2 output + Kabsch alignment; uses Boltz-2 direct B-factor prediction when available, falls back to pLDDT→pseudo-B |
 | `rocket/refinement_config.py` | `Boltz2Config` fields; `gen_config_phase2` handles Boltz-2 bias filenames |
 | `rocket/scripts/run_preprocess.py` | `rk.preprocess --model boltz2` — unified preprocessing (predict + MR + feats + configs) |
 | `rocket/scripts/run_prep_boltz2.py` | `rk.prep_boltz2` — standalone feats + config generation (for use with an existing PDB) |
@@ -137,8 +146,8 @@ diffusion seeds, selects the best by LLG, and saves:
 ```
 1lj5_processed/ROCKET_outputs/<uuid>/phase1_boltz2_1lj5/
   best_model_A_42.pdb       # best structure
-  best_w_pair_A_42.pt       # multiplicative bias  [1, N, N, 128]
-  best_b_pair_A_42.pt       # additive bias        [1, N, N, 128]
+  best_w_pair_A_42.pt       # channel-wise weight matrix  [128, 128]
+  best_b_pair_A_42.pt       # channel-wise bias vector    [128]
   NEG_LLG_it_A.npy, rwork_it_A.npy, rfree_it_A.npy, …
 ```
 
@@ -208,12 +217,27 @@ boltz2:
   boltz2_num_sampling_steps: 200         # total diffusion steps T
 ```
 
+**B-factor note**: `coordinates_boltz2.py` now uses Boltz-2's direct `bfactor_module`
+prediction when available (`model.predict_bfactor=True`, which is the case for
+`boltz2_conf.ckpt`).  The module outputs a histogram over B ∈ [0, 100] Å²; the
+expected value is taken via softmax and broadcast from tokens to atoms.  If the
+checkpoint does not include a bfactor module, the code falls back to the
+pLDDT→pseudo-B conversion used in the original AF2-ROCKET.
+
+**Learning-rate note**: The channel-wise `[128, 128]` bias uses Adam.  Adam
+normalises gradients to ≈1 per element, so `multiplicative_learning_rate=1.0`
+would change every element of `w_pair` by ±1.0 in the first step — destroying
+the identity initialisation instantly.  Both `rk.preprocess` and `rk.prep_boltz2`
+now generate configs with `multiplicative_learning_rate=0.001` (tested; gives
+monotone LLG improvement).
+
 Phase-2 config differences vs Phase-1:
 
 | Field | Phase 1 | Phase 2 |
 |---|---|---|
 | `algorithm.iterations` | 100 | 500 |
-| `algorithm.optimization.additive_learning_rate` | 0.05 | 0.0001 |
+| `algorithm.optimization.additive_learning_rate` | **0.001** | **0.0001** |
+| `algorithm.optimization.multiplicative_learning_rate` | **0.001** | **0.0001** |
 | `algorithm.optimization.l2_weight` | 1e-7 | 0.0 |
 | `algorithm.optimization.smooth_stage_epochs` | 50 | null |
 | `data.min_resolution` | 3.0 Å | null (all) |

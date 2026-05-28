@@ -559,8 +559,10 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
             iterations=100,
             init_recycling=3,
             optimization=OptimizationParams(
-                additive_learning_rate=0.05,
-                multiplicative_learning_rate=1.0,
+                # ConForNets channel-wise [128,128] bias: Adam normalises gradient to ≈1
+                # so lr=1.0 moves each element by ±1.0 per step, destroying identity init.
+                additive_learning_rate=1e-3,
+                multiplicative_learning_rate=1e-3,
                 l2_weight=1e-7,
                 phase2_final_lr=1e-4,
                 smooth_stage_epochs=50,

@@ -112,7 +112,6 @@ rk.preprocess --model boltz2 [--a3m_path alignment.a3m]
   │
   ├─ phenix.superpose_pdbs
   │     superposes the full Boltz-2 prediction onto the MR model
-  │     converts pLDDT → pseudo-B-factors
   │     → ROCKET_inputs/{file_id}-pred-aligned.pdb
   │
   └─ phasertng mtz_generator
@@ -176,16 +175,19 @@ FIXED (loaded once, never updated):
   reference_pos   initial atom coords (pred-aligned)  [N, 3]  GPU
 
 LEARNABLE (updated every step):
-  w_pair   [1, N, N, 128]   ones-init    requires_grad=True
-  b_pair   [1, N, N, 128]   zeros-init   requires_grad=True
+  w_pair   [128, 128]   identity-init   requires_grad=True   (16 384 params)
+  b_pair   [128]        zeros-init      requires_grad=True   (128 params)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
-### Step 1 — Trunk recycling
+### Step 1 — Trunk recycling with ConForNets bias
 
 The Boltz-2 trunk runs for `recycling_steps` iterations (default 3).
 Only the **final** iteration retains the autograd graph; earlier ones are
 detached to avoid backpropagating through the entire recycling stack.
+
+The learnable bias is injected on the final recycling pass, **before the
+PairFormer stack** (inspired by ConForNets, arxiv 2604.18559):
 
 ```
 feats → input_embedder → s_inputs [1, N, 384]
@@ -195,17 +197,28 @@ for i = 0 … recycling_steps:
     s = s_init + s_recycle(s_norm(s_prev))
     z = z_init + z_recycle(z_norm(z_prev))
     z = z + msa_module(z, s_inputs, feats)    ← active if a3m provided
-    s, z = pairformer_module(s, z, mask)
     |
-    | no_grad for i < recycling_steps − 1
-    | enable_grad for i == recycling_steps − 1   (final only)
-
-z_biased = w_pair * z + b_pair     ← PAIR BIAS INJECTION
+    | no_grad for i < recycling_steps
+    | enable_grad for i == recycling_steps   (final only)
+    |
+    if final iteration:
+        z = z @ w_pair + b_pair              ← BIAS INJECTION (pre-PairFormer)
+        s, z = pairformer_module(s, z, mask) ← activation-checkpointed per block
+    else:
+        s, z = pairformer_module(s, z, mask)
 ```
 
-`z_biased` carries the gradient graph back to `w_pair` and `b_pair`.
-Everything upstream (input embedder, PairFormer, MSA module) is frozen and
-receives no gradient.
+- `w_pair [128, 128]` — initialised to identity; same transform applied to
+  all (i, j) positions, independent of protein length
+- `b_pair [128]` — initialised to zeros; broadcast over all positions
+
+Activation checkpointing is applied to every PairFormer block on the final pass
+so gradients flow back through the whole PairFormer stack without storing all
+intermediate activations.  Python closure late-binding is avoided by capturing
+each block via default-argument in the per-block checkpoint closure.
+
+`z_out` after PairFormer carries the gradient graph back to `w_pair` and
+`b_pair` via `z @ w_pair + b_pair`.
 
 ### Step 2 — Diffusion conditioning
 
@@ -213,14 +226,15 @@ receives no gradient.
 q, c, atom_enc_bias, atom_dec_bias, token_trans_bias
   = DiffusionConditioning(
         s_trunk    = s,
-        z_trunk    = z_biased,     ← grad flows: z_biased → w_pair, b_pair
+        z_trunk    = z_out,        ← grad flows: z_out → w_pair @ z → w_pair, b_pair
         rel_pos    = rel_pos(feats),
         feats      = feats,
     )
 ```
 
 `q` and `c` are the token-level keys and context passed into the diffusion
-transformer.  They carry the gradient from `z_biased`.
+transformer.  They carry the gradient that flows back through PairFormer → bias
+injection → `w_pair` and `b_pair`.
 
 ### Step 3 — Truncated-backprop diffusion sampling
 
@@ -298,16 +312,24 @@ coordinates so the gradient can still flow back through the alignment.
 ### Step 6 — B-factors (no grad)
 
 ```
+# Preferred path (boltz2_conf.ckpt has predict_bfactor=True):
 token_B = softmax(bfactor_module(s.detach())) · bin_centers   [1, N_tokens]
+
+# Fallback if bfactor_module is absent:
+token_B = plddt2pseudoB(plddt · 100)                          [1, N_tokens]
+
 atom_B  = token_B[:, atom_to_token_idx]                        [1, N_atoms]
 sfc.atom_b_iso = atom_B.detach().clamp(max=200.0)
 ```
 
+Boltz-2's `bfactor_module` predicts a histogram over B ∈ [0, 100] Å²; we take
+the expected value under that distribution.  If the checkpoint does not include
+`bfactor_module` (i.e. `model.predict_bfactor=False`), the code falls back to
+the pLDDT→pseudo-B conversion used in the original AF2-ROCKET.
+
 B-factors modulate the Debye–Waller fall-off in F_calc but are always detached
 before being set on the SFC — consistent with the original ROCKET design.
-The 200 Å² clamp ensures F_calc values remain numerically meaningful (Boltz-2
-single-sequence pLDDT is lower than AF2, which can produce very large raw
-pseudo-B values that would zero out F_calc at all resolutions).
+The 200 Å² clamp ensures F_calc values remain numerically meaningful.
 
 ### Step 7 — LLG computation
 
@@ -360,15 +382,24 @@ L.backward()
 ## 5. Gradient Flow at a Glance
 
 ```
-w_pair, b_pair                   ← only learnable parameters
+w_pair [128,128], b_pair [128]    ← only learnable parameters
+    │
+    ▼  (final recycling pass only)
+z_pre = z_init + z_recycle + msa_module   [B, N, N, 128]    (no_grad upstream)
     │
     ▼
-z_biased = w_pair * z + b_pair   [1, N, N, 128]
+z @ w_pair + b_pair               ← BIAS INJECTION
+    │
+    ▼  (activation-checkpointed per block)
+PairFormer blocks × L
+    │
+    ▼
+z_out [B, N, N, 128]
     │
     ▼
 DiffusionConditioning → q, c, enc_bias, dec_bias, trans_bias
     │
-    ▼  (last K reverse-diffusion steps)
+    ▼  (last K reverse-diffusion steps; earlier T−K steps detached)
 DiffusionTransformer
     │
     ▼
@@ -387,8 +418,9 @@ SFcalculator.calc_fprotein → F_calc(h)
 Rice likelihood → LLG → −LLG = loss
 ```
 
-Everything upstream of the bias injection (input embedder, PairFormer,
-MSA module, Boltz-2 weights) is **frozen** and receives no gradient.
+The input embedder, MSA module, and Boltz-2 weights are **frozen**; no gradient
+reaches them.  Gradients do flow through PairFormer (via activation checkpointing)
+because the bias is injected before the PairFormer stack.
 
 ---
 
@@ -404,7 +436,8 @@ a robust signal less sensitive to model errors at high resolution.
 algorithm:
   iterations: 100
   optimization:
-    additive_learning_rate: 0.05     # large LR — explore
+    additive_learning_rate: 0.001    # lr for b_pair  [128]
+    multiplicative_learning_rate: 0.001  # lr for w_pair  [128, 128]
     l2_weight: 1.0e-7                # regularise toward initial prediction
     smooth_stage_epochs: 50          # cosine LR decay after iter 50
 data:
@@ -412,6 +445,14 @@ data:
 execution:
   num_of_runs: 3                     # independent traces
 ```
+
+**Why 0.001 and not the AF2-ROCKET default of 1.0?** Adam normalises the gradient
+to ≈1 per element per step (first-order moment / sqrt(second-order moment)).
+With `lr=1.0`, every element of the `[128, 128]` identity matrix moves by ±1.0
+in the very first step, converting it to a random scrambled matrix.  This
+instantly destroys the Boltz-2 prediction quality and collapses LLG.  With
+`lr=0.001`, each element changes by ~0.001 per step, which is a small
+perturbation to the identity — exactly what we want.
 
 At the end, the run with the lowest −LLG is selected.  Its `best_w_pair` and
 `best_b_pair` are saved for Phase 2.
@@ -444,12 +485,21 @@ execution:
 
 ## 7. Design Choices
 
-### Why the pair representation z?
+### Why a channel-wise [128, 128] transform before PairFormer?
 
-Boltz-2 has no MSA track.  `z` is the primary inter-residue feature passed from
-the trunk into the diffusion conditioning module — the natural analogue to the
-AF2 MSA cluster profile.  Biasing `z` directly modulates the geometric priors
-(pairwise distances, orientations) fed into the diffusion process.
+This design follows ConForNets (arxiv 2604.18559): a channel-wise affine
+transform of the pre-PairFormer pair latents.
+
+Applying the transform **before PairFormer** (rather than after, on the output
+`z`) means the PairFormer blocks can propagate and amplify the bias signal
+through their full triangle-attention / outer-product machinery.  The gradient
+path therefore runs through the entire PairFormer stack, giving a richer
+training signal than a post-hoc additive shift.
+
+Using a `[128, 128]` matrix instead of a per-position `[N, N, 128]` tensor
+makes the parameter count **length-independent** (16,512 params vs. O(N²)), and
+produces a smoother optimisation landscape because the same transformation is
+enforced at every residue pair.
 
 ### Why truncated backprop through diffusion?
 

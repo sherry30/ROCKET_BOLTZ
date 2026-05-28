@@ -181,8 +181,11 @@ def cli_run_prep_boltz2() -> None:
             iterations=args.phase1_iterations,
             init_recycling=args.recycling_steps,
             optimization=OptimizationParams(
-                additive_learning_rate=0.05,
-                multiplicative_learning_rate=1.0,
+                # ConForNets channel-wise [128,128] bias: Adam with lr=1.0 changes
+                # each element by ±1.0 (Adam normalises gradient to ≈1), destroying
+                # the identity-matrix initialisation in a single step.  Use 1e-3.
+                additive_learning_rate=1e-3,
+                multiplicative_learning_rate=1e-3,
                 l2_weight=1e-7,
                 phase2_final_lr=1e-4,
                 smooth_stage_epochs=50,

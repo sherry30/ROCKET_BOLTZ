@@ -188,7 +188,7 @@ def test_coord_extraction(model_out: dict, feats_gpu: dict, device: str) -> tupl
     from rocket.coordinates_boltz2 import extract_allatoms_boltz2
 
     try:
-        xyz_sfc, plddt_atom = extract_allatoms_boltz2(
+        xyz_sfc, plddt_atom, bfactor_atom = extract_allatoms_boltz2(
             model_out["sample_atom_coords"],
             feats_gpu,
             cra_name,
