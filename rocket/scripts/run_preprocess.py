@@ -1,8 +1,11 @@
 import argparse
 import glob
 import os
+import pickle
 import shutil
 import subprocess
+import uuid
+from pathlib import Path
 
 from loguru import logger
 from SFC_Torch import PDBParser
@@ -344,12 +347,13 @@ def prepare_rk_inputs(file_id, output_dir, method):
         shutil.copy2(mtz_src, mtz_dst)
 
 
-def prepare_pred_aligned(output_dir, file_id):
+def prepare_pred_aligned(output_dir, file_id, pred_model_path=None):
     mr_model_path = os.path.join(output_dir, "ROCKET_inputs", f"{file_id}-MRed.pdb")
     assert os.path.exists(mr_model_path), f"MR model not found: {mr_model_path}"
-    pred_model_path = os.path.join(
-        output_dir, "predictions", f"{file_id}_model_1_ptm_unrelaxed.pdb"
-    )
+    if pred_model_path is None:
+        pred_model_path = os.path.join(
+            output_dir, "predictions", f"{file_id}_model_1_ptm_unrelaxed.pdb"
+        )
     assert os.path.exists(pred_model_path), (
         f"Predicted model not found: {pred_model_path}"
     )
@@ -377,8 +381,8 @@ def prepare_pred_aligned(output_dir, file_id):
     )
 
 
-def symlink_input_files(file_id, output_dir, precomputed_alignment_dir):
-    """Symlinks the sequence FASTA and alignment directory to the output folder."""
+def symlink_input_files(file_id, output_dir, precomputed_alignment_dir=None):
+    """Symlinks the sequence FASTA and (optionally) alignment directory to the output folder."""
     fasta_src = os.path.join(f"{file_id}_fasta", f"{file_id}.fasta")
     fasta_dst = os.path.join(output_dir, f"{file_id}.fasta")
     if os.path.exists(fasta_src):
@@ -387,12 +391,206 @@ def symlink_input_files(file_id, output_dir, precomputed_alignment_dir):
     else:
         raise FileNotFoundError(f"FASTA file not found: {fasta_src}")
 
-    alignments_dst = os.path.join(output_dir, "alignments")
-    if not os.path.exists(alignments_dst):
-        os.symlink(
-            os.path.join(os.path.abspath(precomputed_alignment_dir), file_id),
-            alignments_dst,
-        )
+    if precomputed_alignment_dir is not None:
+        alignments_dst = os.path.join(output_dir, "alignments")
+        if not os.path.exists(alignments_dst):
+            os.symlink(
+                os.path.join(os.path.abspath(precomputed_alignment_dir), file_id),
+                alignments_dst,
+            )
+
+
+def _read_fasta_sequences(fasta_path: str) -> list:
+    """Parse a FASTA file and return list of {id, sequence} dicts."""
+    sequences = []
+    current_id = None
+    current_seq = []
+    with open(fasta_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">"):
+                if current_id is not None:
+                    sequences.append({"id": current_id, "sequence": "".join(current_seq)})
+                current_id = line[1:].split()[0]
+                current_seq = []
+            elif line:
+                current_seq.append(line)
+    if current_id is not None:
+        sequences.append({"id": current_id, "sequence": "".join(current_seq)})
+    return sequences
+
+
+def _write_boltz_yaml(
+    sequences: list, output_dir: str, file_id: str, a3m_path: str = None
+) -> str:
+    """Write a boltz YAML input file from sequence list; returns path."""
+    yaml_path = os.path.join(output_dir, f"{file_id}_boltz_input.yaml")
+    if os.path.exists(yaml_path):
+        return yaml_path
+    lines = ["version: 1", "sequences:"]
+    for i, s in enumerate(sequences):
+        chain_id = s["id"] if len(s["id"]) == 1 else chr(65 + i)
+        lines.append("  - protein:")
+        lines.append(f"      id: {chain_id}")
+        lines.append(f"      sequence: {s['sequence']}")
+        if a3m_path:
+            lines.append(f"      msa: {os.path.abspath(a3m_path)}")
+    with open(yaml_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return yaml_path
+
+
+def _find_a3m_from_alignment_dir(alignment_dir: str, file_id: str) -> str | None:
+    """Return the best available a3m file from a precomputed alignment directory.
+
+    Looks inside ``{alignment_dir}/{file_id}/`` for a3m files, preferring
+    bfd_uniclust_hits.a3m > uniref90_hits.a3m > mgnify_hits.a3m > any *.a3m.
+    Returns None if the directory or no a3m files are found.
+    """
+    if alignment_dir is None:
+        return None
+    search_dir = os.path.join(os.path.abspath(alignment_dir), file_id)
+    if not os.path.isdir(search_dir):
+        return None
+    for name in ("bfd_uniclust_hits.a3m", "uniref90_hits.a3m", "mgnify_hits.a3m"):
+        candidate = os.path.join(search_dir, name)
+        if os.path.exists(candidate):
+            logger.info(f"Found MSA for Boltz-2: {candidate}")
+            return candidate
+    hits = glob.glob(os.path.join(search_dir, "*.a3m"))
+    if hits:
+        logger.info(f"Found MSA for Boltz-2: {hits[0]}")
+        return hits[0]
+    return None
+
+
+def run_boltz2_predict(
+    fasta_path: str, output_dir: str, cache_dir: str = None, a3m_path: str = None
+) -> str:
+    """Run boltz predict on the given FASTA and return path to the output PDB."""
+    file_id = os.path.splitext(os.path.basename(fasta_path))[0]
+    predictions_dir = os.path.join(output_dir, "predictions")
+    os.makedirs(predictions_dir, exist_ok=True)
+
+    pdb_path = os.path.join(predictions_dir, f"{file_id}_boltz2_unrelaxed.pdb")
+    if os.path.exists(pdb_path):
+        logger.info(f"Skipping boltz predict: output {pdb_path} already exists.")
+        return pdb_path
+
+    sequences = _read_fasta_sequences(fasta_path)
+    boltz_yaml = _write_boltz_yaml(sequences, output_dir, file_id, a3m_path=a3m_path)
+    yaml_stem = os.path.splitext(os.path.basename(boltz_yaml))[0]
+
+    boltz_out_dir = os.path.join(output_dir, "boltz_predictions")
+    cmd = [
+        "boltz", "predict", boltz_yaml,
+        "--out_dir", boltz_out_dir,
+        "--model", "boltz2",
+        "--diffusion_samples", "1",
+        "--output_format", "pdb",
+        "--no_kernels",
+        "--override",
+    ]
+    if cache_dir:
+        cmd.extend(["--cache", cache_dir])
+    run_command(cmd)
+
+    # boltz writes: <out_dir>/boltz_results_<stem>/predictions/<stem>/<stem>_model_0.pdb
+    pdb_files = glob.glob(
+        os.path.join(boltz_out_dir, "**", "*.pdb"), recursive=True
+    )
+    if not pdb_files:
+        raise FileNotFoundError(f"No boltz predict PDB output found in {boltz_out_dir}")
+    boltz_pdb = sorted(pdb_files)[0]
+    logger.info(f"Boltz-2 prediction: {boltz_pdb}")
+
+    shutil.copy2(boltz_pdb, pdb_path)
+    logger.info(f"Copied to: {pdb_path}")
+    return pdb_path
+
+
+def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
+    """Generate feats_boltz2.pkl and Boltz-2 ROCKET config YAMLs."""
+    from ..refinement_boltz2 import prepare_boltz2_feats
+    from ..refinement_config import (
+        AlgorithmConfig,
+        AlphaFoldConfig,
+        Boltz2Config,
+        DataConfig,
+        ExecutionConfig,
+        OptimizationParams,
+        PathConfig,
+        RocketRefinmentConfig,
+    )
+
+    output_dir = os.path.abspath(args.output_dir)
+    rocket_inputs = os.path.join(output_dir, "ROCKET_inputs")
+    pdb_path = os.path.join(rocket_inputs, f"{args.file_id}-pred-aligned.pdb")
+
+    cache_dir = args.boltz2_cache_dir or os.environ.get(
+        "BOLTZ_CACHE", str(Path.home() / ".boltz")
+    )
+    checkpoint = args.boltz2_checkpoint or os.path.join(cache_dir, "boltz2_conf.ckpt")
+
+    feats = prepare_boltz2_feats(
+        pdb_path=pdb_path, cache_dir=cache_dir, a3m_path=a3m_path, device="cpu"
+    )
+    feats_path = os.path.join(rocket_inputs, "feats_boltz2.pkl")
+    with open(feats_path, "wb") as fh:
+        pickle.dump(feats, fh)
+    logger.info(f"Saved feats → {feats_path}")
+
+    run_uuid = uuid.uuid4().hex[:10]
+    phase1_config = RocketRefinmentConfig(
+        note=f"phase1_boltz2_{args.file_id}",
+        paths=PathConfig(
+            path=output_dir,
+            file_id=args.file_id,
+            input_pdb=pdb_path,
+            uuid_hex=run_uuid,
+        ),
+        execution=ExecutionConfig(
+            cuda_device=0,
+            num_of_runs=3,
+            verbose=False,
+            model="boltz2",
+        ),
+        algorithm=AlgorithmConfig(
+            iterations=100,
+            init_recycling=3,
+            optimization=OptimizationParams(
+                additive_learning_rate=0.05,
+                multiplicative_learning_rate=1.0,
+                l2_weight=1e-7,
+                phase2_final_lr=1e-4,
+                smooth_stage_epochs=50,
+            ),
+        ),
+        data=DataConfig(datamode=args.method, min_resolution=3.0),
+        alphafold=AlphaFoldConfig(use_deepspeed_evo_attention=False),
+        boltz2=Boltz2Config(
+            boltz2_checkpoint_path=checkpoint,
+            truncated_backprop_steps=5,
+            boltz2_recycling_steps=3,
+            boltz2_num_sampling_steps=200,
+            feats_path=feats_path,
+        ),
+    )
+    if seg_id:
+        phase1_config.algorithm.domain_segs = seg_id
+
+    phase1_yaml = os.path.join(output_dir, "ROCKET_config_phase1_boltz2.yaml")
+    phase1_config.to_yaml_file(phase1_yaml)
+    logger.info(f"Saved Phase-1 config → {phase1_yaml}")
+
+    phase2_config = gen_config_phase2(phase1_config)
+    phase2_config.note = f"phase2_boltz2_{args.file_id}"
+    phase2_config.algorithm.iterations = 500
+    phase2_config.boltz2.feats_path = feats_path
+
+    phase2_yaml = os.path.join(output_dir, "ROCKET_config_phase2_boltz2.yaml")
+    phase2_config.to_yaml_file(phase2_yaml)
+    logger.info(f"Saved Phase-2 config → {phase2_yaml}")
 
 
 def parse_args():
@@ -404,6 +602,14 @@ def parse_args():
     parser.add_argument("--method", choices=["xray", "cryoem"], required=True)
     parser.add_argument("--resolution", default=None)
     parser.add_argument("--output_dir", default="preprocessing_output")
+    parser.add_argument("--model", choices=["alphafold", "boltz2"], default="alphafold",
+                        help="Structure predictor to use (default: alphafold).")
+    parser.add_argument("--boltz2_cache_dir", default=None,
+                        help="Boltz cache dir (mols/ + boltz2_conf.ckpt). "
+                             "Defaults to $BOLTZ_CACHE or ~/.boltz.")
+    parser.add_argument("--boltz2_checkpoint", default=None,
+                        help="Path to boltz2_conf.ckpt. "
+                             "Defaults to <boltz2_cache_dir>/boltz2_conf.ckpt.")
     parser.add_argument("--precomputed_alignment_dir", default="alignments/")
     parser.add_argument("--max_recycling_iters", type=int, default=4)
     parser.add_argument(
@@ -463,77 +669,127 @@ def cli_runpreprocess():
     args = parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    symlink_input_files(args.file_id, args.output_dir, args.precomputed_alignment_dir)
 
-    predicted_model = run_openfold(
-        args.file_id,
-        args.output_dir,
-        args.precomputed_alignment_dir,
-        args.jax_params_path,
-        args.max_recycling_iters,
-        args.use_deepspeed_evoformer_attention,
-    )
-    run_process_predicted_model(args.file_id, args.output_dir, predicted_model)
-    move_processed_predicted_files(args.output_dir)
+    if args.model == "boltz2":
+        # --- Boltz-2 path: boltz predict replaces OpenFold + Phenix processing ---
+        symlink_input_files(args.file_id, args.output_dir)
 
-    dock_into_data(
-        args.file_id,
-        args.method,
-        args.resolution,
-        args.output_dir,
-        predicted_model,
-        args.predocked_model,
-        args.map,
-        args.map1,
-        args.map2,
-        args.fixed_model,
-        args.full_composition,
-    )
-    prepare_rk_inputs(args.file_id, args.output_dir, args.method)
-    prepare_pred_aligned(args.output_dir, args.file_id)
-    seg_id = generate_seg_id_file(args.file_id, args.output_dir)
-
-    # Generate ROCKET configuration yaml files
-    phase1_config = gen_config_phase1(
-        datamode=args.method,
-        file_id=args.file_id,
-        working_dir=os.path.abspath(args.output_dir),
-        use_deepspeed_evo_attention=args.use_deepspeed_evoformer_attention,
-    )
-    phase1_config.algorithm.init_recycling = args.max_recycling_iters
-
-    # Use smaller learning rates for low-resolution cryoEM data (> 5 Å)
-    resolution_value = None
-    if args.resolution is not None:
-        try:
-            resolution_value = float(args.resolution)
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid resolution value '{}' provided; skipping resolution-based "
-                "learning rate adjustment.",
-                args.resolution,
-            )
-    is_low_res_cryoem = (
-        args.method == "cryoem"
-        and resolution_value is not None
-        and resolution_value > 5.0
-    )
-    if is_low_res_cryoem:
-        logger.info(
-            f"Low-resolution cryoEM ({args.resolution} Å): setting lr_a=1e-4, lr_m=1e-3"
+        # Auto-detect MSA from precomputed_alignment_dir if available
+        a3m_path = _find_a3m_from_alignment_dir(
+            args.precomputed_alignment_dir, args.file_id
         )
-        phase1_config.algorithm.optimization.additive_learning_rate = 1e-4
-        phase1_config.algorithm.optimization.multiplicative_learning_rate = 1e-3
 
-    if seg_id:
-        phase1_config.algorithm.domain_segs = seg_id
-    phase1_config.to_yaml_file(
-        os.path.join(args.output_dir, "ROCKET_config_phase1.yaml")
-    )
-    phase2_config = gen_config_phase2(phase1_config)
-    phase2_config.to_yaml_file(
-        os.path.join(args.output_dir, "ROCKET_config_phase2.yaml")
-    )
+        fasta_path = os.path.join(args.output_dir, f"{args.file_id}.fasta")
+        predicted_model = run_boltz2_predict(
+            fasta_path=fasta_path,
+            output_dir=args.output_dir,
+            cache_dir=args.boltz2_cache_dir,
+            a3m_path=a3m_path,
+        )
+
+        # Place boltz2 PDB in processed_predicted_files so Phaser MR can find it
+        processed_dir = os.path.join(args.output_dir, "processed_predicted_files")
+        os.makedirs(processed_dir, exist_ok=True)
+        shutil.copy2(
+            predicted_model,
+            os.path.join(processed_dir, os.path.basename(predicted_model)),
+        )
+
+        dock_into_data(
+            args.file_id,
+            args.method,
+            args.resolution,
+            args.output_dir,
+            predicted_model,
+            args.predocked_model,
+            args.map,
+            args.map1,
+            args.map2,
+            args.fixed_model,
+            args.full_composition,
+        )
+        prepare_rk_inputs(args.file_id, args.output_dir, args.method)
+        prepare_pred_aligned(
+            args.output_dir, args.file_id, pred_model_path=predicted_model
+        )
+        seg_id = generate_seg_id_file(args.file_id, args.output_dir)
+        _generate_boltz2_outputs(args, seg_id, a3m_path=a3m_path)
+
+    else:
+        # --- AlphaFold / OpenFold path (original) ---
+        symlink_input_files(
+            args.file_id, args.output_dir, args.precomputed_alignment_dir
+        )
+
+        predicted_model = run_openfold(
+            args.file_id,
+            args.output_dir,
+            args.precomputed_alignment_dir,
+            args.jax_params_path,
+            args.max_recycling_iters,
+            args.use_deepspeed_evoformer_attention,
+        )
+        run_process_predicted_model(args.file_id, args.output_dir, predicted_model)
+        move_processed_predicted_files(args.output_dir)
+
+        dock_into_data(
+            args.file_id,
+            args.method,
+            args.resolution,
+            args.output_dir,
+            predicted_model,
+            args.predocked_model,
+            args.map,
+            args.map1,
+            args.map2,
+            args.fixed_model,
+            args.full_composition,
+        )
+        prepare_rk_inputs(args.file_id, args.output_dir, args.method)
+        prepare_pred_aligned(args.output_dir, args.file_id)
+        seg_id = generate_seg_id_file(args.file_id, args.output_dir)
+
+        # Generate AF2 ROCKET configuration yaml files
+        phase1_config = gen_config_phase1(
+            datamode=args.method,
+            file_id=args.file_id,
+            working_dir=os.path.abspath(args.output_dir),
+            use_deepspeed_evo_attention=args.use_deepspeed_evoformer_attention,
+        )
+        phase1_config.algorithm.init_recycling = args.max_recycling_iters
+
+        # Use smaller learning rates for low-resolution cryoEM data (> 5 Å)
+        resolution_value = None
+        if args.resolution is not None:
+            try:
+                resolution_value = float(args.resolution)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid resolution value '{}' provided; skipping resolution-based "
+                    "learning rate adjustment.",
+                    args.resolution,
+                )
+        is_low_res_cryoem = (
+            args.method == "cryoem"
+            and resolution_value is not None
+            and resolution_value > 5.0
+        )
+        if is_low_res_cryoem:
+            logger.info(
+                f"Low-resolution cryoEM ({args.resolution} Å): setting lr_a=1e-4, lr_m=1e-3"
+            )
+            phase1_config.algorithm.optimization.additive_learning_rate = 1e-4
+            phase1_config.algorithm.optimization.multiplicative_learning_rate = 1e-3
+
+        if seg_id:
+            phase1_config.algorithm.domain_segs = seg_id
+        phase1_config.to_yaml_file(
+            os.path.join(args.output_dir, "ROCKET_config_phase1.yaml")
+        )
+        phase2_config = gen_config_phase2(phase1_config)
+        phase2_config.to_yaml_file(
+            os.path.join(args.output_dir, "ROCKET_config_phase2.yaml")
+        )
 
 
 if __name__ == "__main__":

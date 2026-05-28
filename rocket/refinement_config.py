@@ -47,6 +47,7 @@ class ExecutionConfig(BaseModel):
     cuda_device: int = 0
     num_of_runs: int = 1
     verbose: bool = False
+    model: str = "alphafold"  # "alphafold" | "boltz2"
 
 
 # Optimization parameters
@@ -122,6 +123,14 @@ class AlphaFoldConfig(BaseModel):
     use_deepspeed_evo_attention: bool = True  # Default to True
 
 
+class Boltz2Config(BaseModel):
+    boltz2_checkpoint_path: str | None = None
+    truncated_backprop_steps: int = 5
+    boltz2_recycling_steps: int = 3
+    boltz2_num_sampling_steps: int = 200
+    feats_path: str | None = None
+
+
 class MonitoringConfig(BaseModel):
     use_wandb: bool = False
     wandb_project: str | None = None
@@ -142,6 +151,7 @@ class RocketRefinmentConfig(BaseModel):
     algorithm: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     alphafold: AlphaFoldConfig = Field(default_factory=AlphaFoldConfig)
+    boltz2: Boltz2Config = Field(default_factory=Boltz2Config)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
     model_config = {"use_enum_values": True}
@@ -164,6 +174,7 @@ class RocketRefinmentConfig(BaseModel):
         "cuda_device": "execution.cuda_device",
         "num_of_runs": "execution.num_of_runs",
         "verbose": "execution.verbose",
+        "model": "execution.model",
         # AlphaFold
         "use_deepspeed_evo_attention": "alphafold.use_deepspeed_evo_attention",
         # Monitoring
@@ -207,6 +218,12 @@ class RocketRefinmentConfig(BaseModel):
         "msa_subratio": "data.msa_subratio",
         "w_plddt": "data.w_plddt",
         "downsample_ratio": "data.downsample_ratio",
+        # Boltz-2
+        "boltz2_checkpoint_path":    "boltz2.boltz2_checkpoint_path",
+        "truncated_backprop_steps":  "boltz2.truncated_backprop_steps",
+        "boltz2_recycling_steps":    "boltz2.boltz2_recycling_steps",
+        "boltz2_num_sampling_steps": "boltz2.boltz2_num_sampling_steps",
+        "feats_path":                "boltz2.feats_path",
         # Metadata
         "note": "note",
     }
@@ -239,6 +256,7 @@ class RocketRefinmentConfig(BaseModel):
             "execution",
             "algorithm",
             "alphafold",
+            "boltz2",
             "monitoring",
         ]
 
@@ -295,6 +313,7 @@ class RocketRefinmentConfig(BaseModel):
             "execution": {},
             "algorithm": {"optimization": {}, "features": {}},
             "data": {},
+            "boltz2": {},
             "monitoring": {},
             "note": flat_dict.get("note", ""),
         }
@@ -405,8 +424,12 @@ def gen_config_phase2(phase1_config: RocketRefinmentConfig):
     )
     phase1_path = os.path.join(output_directory_path, phase1_config.note)
     input_pdb_path = os.path.join(phase1_path, "best_model_*_*.pdb")
-    starting_bias_path = os.path.join(phase1_path, "best_msa_bias*.pt")
-    starting_weights_path = os.path.join(phase1_path, "best_feat_weights*.pt")
+    if phase1_config.execution.model == "boltz2":
+        starting_bias_path    = os.path.join(phase1_path, "best_w_pair_*.pt")
+        starting_weights_path = os.path.join(phase1_path, "best_b_pair_*.pt")
+    else:
+        starting_bias_path    = os.path.join(phase1_path, "best_msa_bias*.pt")
+        starting_weights_path = os.path.join(phase1_path, "best_feat_weights*.pt")
 
     phase2_config.paths.input_pdb = input_pdb_path
     phase2_config.paths.starting_bias = starting_bias_path
