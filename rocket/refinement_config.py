@@ -129,6 +129,7 @@ class Boltz2Config(BaseModel):
     boltz2_recycling_steps: int = 3
     boltz2_num_sampling_steps: int = 200
     feats_path: str | None = None
+    precomputed_seed_scan: str | None = None  # path to ROCKET_inputs/seed_scan.npy
 
 
 class MonitoringConfig(BaseModel):
@@ -224,6 +225,7 @@ class RocketRefinmentConfig(BaseModel):
         "boltz2_recycling_steps":    "boltz2.boltz2_recycling_steps",
         "boltz2_num_sampling_steps": "boltz2.boltz2_num_sampling_steps",
         "feats_path":                "boltz2.feats_path",
+        "precomputed_seed_scan":     "boltz2.precomputed_seed_scan",
         # Metadata
         "note": "note",
     }

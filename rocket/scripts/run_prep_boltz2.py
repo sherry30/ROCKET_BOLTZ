@@ -72,8 +72,8 @@ def cli_run_prep_boltz2() -> None:
     parser.add_argument(
         "--truncated_backprop_steps",
         type=int,
-        default=5,
-        help="Number of reverse-diffusion steps to retain in the autograd graph (K).",
+        default=20,
+        help="Number of reverse-diffusion steps to retain in the autograd graph (K). K=5 gives too noisy gradients; K=20 is the validated default.",
     )
     parser.add_argument(
         "--sampling_steps",
@@ -111,6 +111,12 @@ def cli_run_prep_boltz2() -> None:
         default=500,
         help="Gradient steps for Phase-2 refinement.",
     )
+    parser.add_argument(
+        "--n_seeds_to_scan",
+        type=int,
+        default=9,
+        help="Number of diffusion seeds to evaluate during seed pre-scan (default 9).",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
@@ -133,7 +139,7 @@ def cli_run_prep_boltz2() -> None:
     # ------------------------------------------------------------------
     # 1. Prepare feats (CPU — no GPU needed)
     # ------------------------------------------------------------------
-    from rocket.refinement_boltz2 import prepare_boltz2_feats
+    from rocket.refinement_boltz2 import prepare_boltz2_feats, precompute_boltz2_seeds
 
     feats = prepare_boltz2_feats(
         pdb_path=pdb_path,
@@ -181,14 +187,15 @@ def cli_run_prep_boltz2() -> None:
             iterations=args.phase1_iterations,
             init_recycling=args.recycling_steps,
             optimization=OptimizationParams(
-                # ConForNets channel-wise [128,128] bias: Adam with lr=1.0 changes
-                # each element by ±1.0 (Adam normalises gradient to ≈1), destroying
-                # the identity-matrix initialisation in a single step.  Use 1e-3.
-                additive_learning_rate=1e-3,
-                multiplicative_learning_rate=1e-3,
+                # lr=1e-3 overshoots even on the first Adam step (T2 debug result:
+                # single step at lr=1e-3 yields Δ=-5 LLG even on full reflections).
+                # lr=1e-4 is stable; smooth_stage_epochs=80 starts decay at iter 20,
+                # decaying from 1e-4 → 1e-5 to prevent post-peak drift.
+                additive_learning_rate=1e-4,
+                multiplicative_learning_rate=1e-4,
                 l2_weight=1e-7,
-                phase2_final_lr=1e-4,
-                smooth_stage_epochs=50,
+                phase2_final_lr=1e-5,
+                smooth_stage_epochs=80,
             ),
         ),
         data=DataConfig(
@@ -205,6 +212,26 @@ def cli_run_prep_boltz2() -> None:
         ),
     )
 
+    # ------------------------------------------------------------------
+    # 2b. Precompute diffusion seed scan (GPU required)
+    #
+    # Evaluate args.n_seeds diffusion seeds with identity bias once; the best
+    # seeds are then selected by rk.refine without re-scanning.
+    # ------------------------------------------------------------------
+    seed_scan_path = rocket_inputs / "seed_scan.npy"
+    try:
+        precompute_boltz2_seeds(
+            config=phase1_config,
+            feats=feats,
+            output_path=str(seed_scan_path),
+            n_seeds=args.n_seeds_to_scan,
+        )
+        phase1_config.boltz2.precomputed_seed_scan = str(seed_scan_path)
+        print(f"[rk.prep_boltz2] Saved seed scan → {seed_scan_path}")
+    except Exception as exc:
+        print(f"[rk.prep_boltz2] WARNING: seed scan failed ({exc}); rk.refine will scan at runtime")
+        seed_scan_path = None
+
     phase1_yaml = output_dir / "ROCKET_config_phase1_boltz2.yaml"
     phase1_config.to_yaml_file(str(phase1_yaml))
     print(f"[rk.prep_boltz2] Saved Phase-1 config → {phase1_yaml}")
@@ -216,6 +243,8 @@ def cli_run_prep_boltz2() -> None:
     phase2_config.note = f"phase2_boltz2_{args.file_id}"
     phase2_config.algorithm.iterations = args.phase2_iterations
     phase2_config.boltz2.feats_path = str(feats_path)
+    if seed_scan_path:
+        phase2_config.boltz2.precomputed_seed_scan = str(seed_scan_path)
 
     phase2_yaml = output_dir / "ROCKET_config_phase2_boltz2.yaml"
     phase2_config.to_yaml_file(str(phase2_yaml))

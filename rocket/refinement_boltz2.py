@@ -42,6 +42,134 @@ from rocket.wandb_logger import WandbLogger
 from rocket.xtal import structurefactors as llg_sf
 
 
+def precompute_boltz2_seeds(
+    config: RocketRefinmentConfig | str,
+    feats: dict,
+    output_path: str,
+    n_seeds: int = 9,
+) -> np.ndarray:
+    """
+    Evaluate n_seeds diffusion seeds with an identity pair bias and save
+    sorted (LLG, seed) pairs to output_path as a .npy file.
+
+    Call this from rk.prep_boltz2 / rk.preprocess so the seed ranking is
+    computed once.  rk.refine then loads the file instead of re-scanning at
+    the beginning of every run.
+
+    Parameters
+    ----------
+    config : RocketRefinmentConfig or str
+        Phase-1 config (used for SFC setup — PDB, MTZ, resolution, device …).
+    feats : dict
+        Boltz-2 featurizer output (CPU tensors, batch dim = 1).
+    output_path : str
+        Where to write the .npy file (e.g. ROCKET_inputs/seed_scan.npy).
+    n_seeds : int
+        Number of diffusion seeds to evaluate (default 9 → enough for 3 runs).
+
+    Returns
+    -------
+    np.ndarray  shape (n_seeds, 2) — columns (LLG, seed_index), best first.
+    """
+    import glob as _glob
+
+    if isinstance(config, str):
+        config = RocketRefinmentConfig.from_yaml_file(config)
+
+    device    = f"cuda:{config.cuda_device}"
+    tng_file  = f"{config.path}/ROCKET_inputs/{config.file_id}-Edata.mtz"
+    input_pdb = _glob.glob(config.input_pdb)[0]
+
+    if config.min_resolution is not None or config.max_resolution is not None:
+        tng_file = rk_utils.apply_resolution_cutoff(
+            tng_file,
+            min_resolution=config.min_resolution,
+            max_resolution=config.max_resolution,
+        )
+
+    sfc = llg_sf.initial_SFC(
+        input_pdb, tng_file, "FEFF", "DOBS",
+        Freelabel=config.free_flag,
+        device=device,
+        testset_value=config.testset_value,
+        spacing=config.voxel_spacing,
+    )
+    sfc_rbr = llg_sf.initial_SFC(
+        input_pdb, tng_file, "FEFF", "DOBS",
+        Freelabel=config.free_flag,
+        device=device,
+        solvent=False,
+        testset_value=config.testset_value,
+        spacing=config.voxel_spacing,
+    )
+    llgloss     = rkrf_utils.init_llgloss(sfc,     tng_file, config.min_resolution, config.max_resolution)
+    llgloss_rbr = rkrf_utils.init_llgloss(sfc_rbr, tng_file, config.min_resolution, config.max_resolution)
+
+    reference_pos = sfc.atom_pos_orth.clone()
+    cra_name      = sfc.cra_name
+    RBR_LBFGS     = config.rbr_opt_algorithm == "lbfgs"
+
+    K           = getattr(config, "truncated_backprop_steps", 5)
+    n_recycling = getattr(config, "boltz2_recycling_steps", config.init_recycling)
+    n_sampling  = getattr(config, "boltz2_num_sampling_steps", 200)
+    boltz2_ckpt = getattr(config, "boltz2_checkpoint_path", None)
+
+    wrapper = Boltz2PairBias(
+        checkpoint_path=boltz2_ckpt,
+        truncated_backprop_steps=K,
+        diffusion_seed=0,
+        num_sampling_steps=n_sampling,
+        recycling_steps=n_recycling,
+        device=device,
+    ).to(device).eval()
+    wrapper.init_bias(device)
+
+    feats_gpu = rk_utils.move_tensors_to_device(feats, device=device)
+
+    logger.info(f"Seed pre-scan: evaluating {n_seeds} seeds (saving to {output_path}) …")
+    scan_results: list[tuple[float, int]] = []
+
+    for seed in range(n_seeds):
+        wrapper.diffusion_seed = seed
+        with torch.no_grad():
+            model_out = wrapper(feats_gpu, recycling_steps=n_recycling,
+                                num_sampling_steps=n_sampling)
+            xyz_scan, _, pseudo_Bs = position_alignment_boltz2(
+                model_output=model_out, feats=feats_gpu,
+                cra_name_sfc=cra_name, best_pos=reference_pos,
+            )
+        xyz_d   = xyz_scan.detach()
+        safe_Bs = pseudo_Bs.detach().clamp(max=200.0)
+        llgloss.sfc.atom_b_iso     = safe_Bs
+        llgloss_rbr.sfc.atom_b_iso = safe_Bs
+        rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_d)
+        opt_xyz, _ = rk_coordinates.rigidbody_refine_quat(
+            xyz_d, llgloss_rbr, cra_name,
+            domain_segs=config.domain_segs,
+            lbfgs=RBR_LBFGS,
+            lbfgs_lr=config.rbr_lbfgs_learning_rate,
+            verbose=False,
+        )
+        llg_val, _, _ = llgloss(
+            opt_xyz, sub_ratio=1.0, solvent=config.solvent,
+            update_scales=config.sfc_scale, return_Rfactors=True,
+        )
+        scan_results.append((llg_val.item(), seed))
+        logger.info(f"  seed {seed}: LLG={llg_val.item():.1f}")
+
+    scan_results.sort(key=lambda x: x[0], reverse=True)
+    arr = np.array(scan_results)
+    np.save(output_path, arr)
+    logger.info(
+        f"Seed scan saved → {output_path}  "
+        f"best: seed {int(arr[0,1])} LLG={arr[0,0]:.1f}"
+    )
+
+    del wrapper
+    torch.cuda.empty_cache()
+    return arr
+
+
 def run_boltz2_xray_refinement(
     config: RocketRefinmentConfig | str,
     feats: dict,
@@ -236,61 +364,71 @@ def run_boltz2_xray_refinement(
     cra_name = sfc.cra_name  # list of "chain-resid-resname-atomname"
 
     # ------------------------------------------------------------------
-    # Pre-scan: pick the best diffusion seeds before committing to long runs.
+    # Seed selection: use precomputed scan if available, otherwise scan inline.
     #
     # Different seeds produce very different initial structures (LLG variance
     # ~300-400 units even with an identity bias), which far exceeds the
-    # optimization signal.  Scanning 3x num_of_runs seeds and taking the best
-    # ones ensures we start from the highest-quality Boltz-2 trajectories.
+    # optimization signal.  Starting from the best seeds is critical.
+    #
+    # rk.prep_boltz2 / rk.preprocess now precompute the scan once and write
+    # the path to config.boltz2.precomputed_seed_scan.  When that file exists
+    # we load it directly (saves ~9 × model-forward time at the start of refine).
     # ------------------------------------------------------------------
-    n_scan = max(config.num_of_runs * 3, 6)
-    logger.info(f"Seed pre-scan: evaluating {n_scan} seeds with identity bias …")
-    _scan_bias = wrapper.init_bias(device)   # identity init — not used for grad
-    scan_llg_by_seed: list[tuple[float, int]] = []
+    precomputed_scan_path = getattr(config, "precomputed_seed_scan", None)
+    if precomputed_scan_path and os.path.exists(str(precomputed_scan_path)):
+        logger.info(f"Loading precomputed seed scan from {precomputed_scan_path}")
+        scan_arr = np.load(str(precomputed_scan_path))
+        scan_llg_by_seed = [(float(r[0]), int(r[1])) for r in scan_arr]
+        scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
+        np.save(f"{out_dir}/seed_scan.npy", scan_arr)
+        wrapper.init_bias(device)   # identity init for first run
+    else:
+        n_scan = max(config.num_of_runs * 3, 6)
+        logger.info(f"Seed pre-scan: evaluating {n_scan} seeds with identity bias …")
+        wrapper.init_bias(device)   # identity init — not used for grad
+        scan_llg_by_seed = []
 
-    for seed in range(n_scan):
-        wrapper.diffusion_seed = seed
-
-        # Only the model forward pass is wrapped in no_grad (saves memory; no
-        # bias gradient needed).  SFC scale/sigmaA optimisations run their own
-        # internal backward() calls and must NOT be inside no_grad.
-        with torch.no_grad():
-            model_scan = wrapper(feats_gpu, recycling_steps=n_recycling,
-                                  num_sampling_steps=n_sampling)
-            xyz_scan, _, pseudo_Bs_scan = position_alignment_boltz2(
-                model_output=model_scan, feats=feats_gpu,
-                cra_name_sfc=cra_name, best_pos=reference_pos,
+        for seed in range(n_scan):
+            wrapper.diffusion_seed = seed
+            # Only the model forward is in no_grad; SFC ops (update_sigmaA,
+            # get_scales_adam) call their own internal backward() and must be
+            # outside no_grad.
+            with torch.no_grad():
+                model_scan = wrapper(feats_gpu, recycling_steps=n_recycling,
+                                      num_sampling_steps=n_sampling)
+                xyz_scan, _, pseudo_Bs_scan = position_alignment_boltz2(
+                    model_output=model_scan, feats=feats_gpu,
+                    cra_name_sfc=cra_name, best_pos=reference_pos,
+                )
+            xyz_scan_d  = xyz_scan.detach()
+            safe_b_scan = pseudo_Bs_scan.detach().clamp(max=200.0)
+            llgloss.sfc.atom_b_iso     = safe_b_scan
+            llgloss_rbr.sfc.atom_b_iso = safe_b_scan
+            rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_scan_d)
+            opt_xyz_scan, _ = rk_coordinates.rigidbody_refine_quat(
+                xyz_scan_d, llgloss_rbr, cra_name,
+                domain_segs=config.domain_segs,
+                lbfgs=RBR_LBFGS,
+                added_chain_HKL=constant_fp_added_HKL,
+                added_chain_asu=constant_fp_added_asu,
+                lbfgs_lr=config.rbr_lbfgs_learning_rate,
+                verbose=False,
             )
+            llg_scan, _, _ = llgloss(
+                opt_xyz_scan, sub_ratio=1.0, solvent=config.solvent,
+                update_scales=config.sfc_scale,
+                added_chain_HKL=constant_fp_added_HKL,
+                added_chain_asu=constant_fp_added_asu,
+                return_Rfactors=True,
+            )
+            scan_llg_by_seed.append((llg_scan.item(), seed))
+            logger.info(f"  seed {seed}: LLG={llg_scan.item():.1f}")
 
-        xyz_scan_d = xyz_scan.detach()
-        safe_b_scan = pseudo_Bs_scan.detach().clamp(max=200.0)
-        llgloss.sfc.atom_b_iso = safe_b_scan
-        llgloss_rbr.sfc.atom_b_iso = safe_b_scan
-        rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_scan_d)
-        opt_xyz_scan, _ = rk_coordinates.rigidbody_refine_quat(
-            xyz_scan_d, llgloss_rbr, cra_name,
-            domain_segs=config.domain_segs,
-            lbfgs=RBR_LBFGS,
-            added_chain_HKL=constant_fp_added_HKL,
-            added_chain_asu=constant_fp_added_asu,
-            lbfgs_lr=config.rbr_lbfgs_learning_rate,
-            verbose=False,
-        )
-        llg_scan, _, _ = llgloss(
-            opt_xyz_scan, sub_ratio=1.0, solvent=config.solvent,
-            update_scales=config.sfc_scale,
-            added_chain_HKL=constant_fp_added_HKL,
-            added_chain_asu=constant_fp_added_asu,
-            return_Rfactors=True,
-        )
-        scan_llg_by_seed.append((llg_scan.item(), seed))
-        logger.info(f"  seed {seed}: LLG={llg_scan.item():.1f}")
+        scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
+        np.save(f"{out_dir}/seed_scan.npy", np.array(scan_llg_by_seed))
 
-    # Select the top num_of_runs seeds (highest LLG = best)
-    scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
     selected_seeds = [seed for _, seed in scan_llg_by_seed[: config.num_of_runs]]
-    logger.info(f"Selected seeds: {selected_seeds}  (scan results: {scan_llg_by_seed})")
-    np.save(f"{out_dir}/seed_scan.npy", np.array(scan_llg_by_seed))
+    logger.info(f"Selected seeds: {selected_seeds}  (scan: {scan_llg_by_seed})")
 
     for n, seed in enumerate(selected_seeds):
         run_id = rkrf_utils.number_to_letter(n)
@@ -496,10 +634,12 @@ def run_boltz2_xray_refinement(
 
             # Apply smooth LR decay in the final smooth_stage_epochs iterations
             if ("phase1" in config.note) and (smooth_stage_epochs is not None):
-                if iteration > (config.iterations - smooth_stage_epochs):
-                    lr_a_current = lr_a * (decay_rate_a ** iteration)
-                    lr_m_current = lr_m * (decay_rate_m ** iteration)
-                    w_L2_current = w_L2 * (1.0 - iteration / smooth_stage_epochs)
+                stage_start = config.iterations - smooth_stage_epochs
+                if iteration > stage_start:
+                    stage_step = iteration - stage_start  # 1 … smooth_stage_epochs
+                    lr_a_current = lr_a * (decay_rate_a ** stage_step)
+                    lr_m_current = lr_m * (decay_rate_m ** stage_step)
+                    w_L2_current = w_L2 * max(0.0, 1.0 - stage_step / smooth_stage_epochs)
                     optimizer.param_groups[0]["lr"] = lr_m_current
                     optimizer.param_groups[1]["lr"] = lr_a_current
 

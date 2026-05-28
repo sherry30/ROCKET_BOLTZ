@@ -238,7 +238,7 @@ injection → `w_pair` and `b_pair`.
 
 ### Step 3 — Truncated-backprop diffusion sampling
 
-T = total sampling steps (default 200), K = truncated_backprop_steps (default 5).
+T = total sampling steps (default 200), K = truncated_backprop_steps (default 20).
 
 ```
 x_T ~ N(0, σ_T²)     initial noisy coordinates     [1, N_atoms, 3]
@@ -259,9 +259,15 @@ for t = T−1 … 0:
 atom_coords = x     [1, N_atoms, 3]     grad-carrying
 ```
 
-Truncating to K=5 steps is a standard TBPTT approximation: storing the full
-T=200-step unrolled graph would be prohibitively expensive and produce very
+Truncating to the last K steps is a standard TBPTT approximation: storing the
+full T=200-step unrolled graph would be prohibitively expensive and produce very
 noisy gradients from stochastic noise injections deep in the chain.
+
+**K=5 is insufficient**: empirical testing showed K=5 (2.5% of the trajectory)
+gives gradients too weak to produce measurable Rwork improvement, and causes
+catastrophic LLG collapse once `w_pair` has drifted ~0.5 Frobenius norm from
+identity.  **K=20** (10% of the trajectory) gives 4× stronger and more
+directionally consistent gradients and is the validated default.
 
 Random coordinate augmentation (rotation/translation applied during normal
 Boltz-2 inference) is disabled during ROCKET to avoid scrambling the gradient
@@ -338,7 +344,7 @@ sfc.atom_pos_orth = optimized_xyz.detach()   update SFC geometry
 
 llg, r_work, r_free = llgloss(
     optimized_xyz,              ← grad-carrying
-    sub_ratio = 0.7,            stochastic subset of reflections
+    sub_ratio = 1.0,            all reflections (sub-sampling adds too much noise)
     solvent   = True,           bulk-solvent correction
     …
 )
@@ -436,29 +442,39 @@ a robust signal less sensitive to model errors at high resolution.
 algorithm:
   iterations: 100
   optimization:
-    additive_learning_rate: 0.001    # lr for b_pair  [128]
-    multiplicative_learning_rate: 0.001  # lr for w_pair  [128, 128]
+    additive_learning_rate: 1e-4     # lr for b_pair  [128]
+    multiplicative_learning_rate: 1e-4  # lr for w_pair  [128, 128]
     l2_weight: 1.0e-7                # regularise toward initial prediction
-    smooth_stage_epochs: 50          # cosine LR decay after iter 50
+    smooth_stage_epochs: 80          # LR decay from iter 20 → iter 100
+    phase2_final_lr: 1e-5            # target lr at end of smooth stage
+    batch_sub_ratio: 1.0             # full reflections (no subset sampling)
 data:
   min_resolution: 3.0
 execution:
   num_of_runs: 3                     # independent traces
 ```
 
-**Why 0.001 and not the AF2-ROCKET default of 1.0?** Adam normalises the gradient
-to ≈1 per element per step (first-order moment / sqrt(second-order moment)).
-With `lr=1.0`, every element of the `[128, 128]` identity matrix moves by ±1.0
-in the very first step, converting it to a random scrambled matrix.  This
-instantly destroys the Boltz-2 prediction quality and collapses LLG.  With
-`lr=0.001`, each element changes by ~0.001 per step, which is a small
-perturbation to the identity — exactly what we want.
+**Why lr=1e-4?** Adam normalises gradients to ≈1 per element per step.  With
+`lr=1e-3`, even the very first Adam step overshoots (empirically: ΔLLG=−5 on
+full reflections after one step at lr=1e-3).  With `lr=1e-4`, the bias stays
+in the productive region near identity for ~20 iterations and then slowly drifts
+away.  The smooth stage (last 80 of 100 iterations) decays lr from 1e-4 to 1e-5,
+locking in the improvement and preventing post-peak drift.
 
-At the end, the run with the lowest −LLG is selected.  Its `best_w_pair` and
-`best_b_pair` are saved for Phase 2.
+**Why full reflections (batch_sub_ratio=1.0)?** Sub-sampling 70% of reflections
+per step (the AF2-ROCKET default) adds ±23 LLG units of noise per step, vs. ±4
+units with full reflections.  With a gradient signal of only ~50–150 LLG units
+total, this noise/signal ratio is unfavourable and causes premature collapse.
 
-Diversity across runs comes from independent diffusion noise seeds (Boltz-2 has
-no MSA to subsample as AF2-ROCKET does).
+**Seed pre-scan**: Before the 3 optimisation runs, `rk.preprocess` evaluates 9
+diffusion seeds with an identity bias and ranks them by LLG.  The 3 best seeds
+are used for the optimisation runs.  Seed-to-seed LLG variance (~370 units) far
+exceeds the optimisation signal (~50–150 units), so starting from the best seeds
+is critical.  The scan result is saved to `ROCKET_inputs/seed_scan.npy` and
+loaded by `rk.refine` at startup.
+
+At the end of Phase 1, the run with the highest LLG is selected.  Its
+`best_w_pair` and `best_b_pair` are saved for Phase 2.
 
 ### Phase 2 — Exploitation
 
@@ -469,9 +485,11 @@ are used and the learning rate is small, giving precise fine-tuning.
 algorithm:
   iterations: 500
   optimization:
-    additive_learning_rate: 0.0001   # small LR — fine-tune
+    additive_learning_rate: 1e-5     # small LR — fine-tune
+    multiplicative_learning_rate: 1e-5
     l2_weight: 0.0                   # no regularisation
     smooth_stage_epochs: null        # constant LR
+    batch_sub_ratio: 1.0
 data:
   min_resolution: null               # all reflections
 paths:
@@ -505,8 +523,11 @@ enforced at every residue pair.
 
 Full backprop through T = 200 steps would require storing the entire unrolled
 computation graph and propagating gradients through stochastic noise injections
-at every step — O(T) memory and very noisy gradients.  Truncating to K = 5 steps
-(TBPTT) captures short-range denoising credit assignment with manageable cost.
+at every step — O(T) memory and very noisy gradients.  Truncating to K = 20 steps
+(TBPTT, 10% of the trajectory) captures short-range denoising credit assignment
+with manageable cost while providing enough gradient signal to reliably improve
+the structure.  K=5 was found empirically to be insufficient — gradients from
+only 2.5% of the trajectory are too weak to produce measurable Rwork improvement.
 
 ### Why detach and reapply in RBR?
 

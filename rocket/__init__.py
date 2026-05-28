@@ -12,7 +12,11 @@ from rocket.helper import make_processed_dict_from_template
 from rocket.msa_cluster import run_msa_cluster
 from rocket.msa_score import run_msa_score
 from rocket.mse import MSEloss, MSElossBB
-from rocket.refinement_boltz2 import prepare_boltz2_feats, run_boltz2_xray_refinement
+from rocket.refinement_boltz2 import (
+    prepare_boltz2_feats,
+    precompute_boltz2_seeds,
+    run_boltz2_xray_refinement,
+)
 from rocket.xtal.targets import LLGloss
 
 __all__ = [
@@ -39,6 +43,7 @@ __all__ = [
     # Refinement
     "run_boltz2_xray_refinement",
     "prepare_boltz2_feats",
+    "precompute_boltz2_seeds",
     # Losses
     "LLGloss",
     "MSEloss",

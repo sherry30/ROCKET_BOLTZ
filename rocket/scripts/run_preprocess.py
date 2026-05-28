@@ -511,7 +511,7 @@ def run_boltz2_predict(
 
 def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
     """Generate feats_boltz2.pkl and Boltz-2 ROCKET config YAMLs."""
-    from ..refinement_boltz2 import prepare_boltz2_feats
+    from ..refinement_boltz2 import prepare_boltz2_feats, precompute_boltz2_seeds
     from ..refinement_config import (
         AlgorithmConfig,
         AlphaFoldConfig,
@@ -559,20 +559,22 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
             iterations=100,
             init_recycling=3,
             optimization=OptimizationParams(
-                # ConForNets channel-wise [128,128] bias: Adam normalises gradient to ≈1
-                # so lr=1.0 moves each element by ±1.0 per step, destroying identity init.
-                additive_learning_rate=1e-3,
-                multiplicative_learning_rate=1e-3,
+                # lr=1e-3 overshoots even on the first Adam step (T2 debug result:
+                # single step at lr=1e-3 yields Δ=-5 LLG even on full reflections).
+                # lr=1e-4 is stable; smooth_stage_epochs=80 starts decay at iter 20,
+                # decaying from 1e-4 → 1e-5 to prevent post-peak drift.
+                additive_learning_rate=1e-4,
+                multiplicative_learning_rate=1e-4,
                 l2_weight=1e-7,
-                phase2_final_lr=1e-4,
-                smooth_stage_epochs=50,
+                phase2_final_lr=1e-5,
+                smooth_stage_epochs=80,
             ),
         ),
         data=DataConfig(datamode=args.method, min_resolution=3.0),
         alphafold=AlphaFoldConfig(use_deepspeed_evo_attention=False),
         boltz2=Boltz2Config(
             boltz2_checkpoint_path=checkpoint,
-            truncated_backprop_steps=5,
+            truncated_backprop_steps=20,
             boltz2_recycling_steps=3,
             boltz2_num_sampling_steps=200,
             feats_path=feats_path,
@@ -580,6 +582,23 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     )
     if seg_id:
         phase1_config.algorithm.domain_segs = seg_id
+
+    # Seed scan — evaluate n_seeds_to_scan diffusion seeds with identity bias
+    # so rk.refine can skip the scan and start immediately from the best seeds.
+    seed_scan_path = os.path.join(rocket_inputs, "seed_scan.npy")
+    n_seeds = getattr(args, "n_seeds_to_scan", 9)
+    try:
+        precompute_boltz2_seeds(
+            config=phase1_config,
+            feats=feats,
+            output_path=seed_scan_path,
+            n_seeds=n_seeds,
+        )
+        phase1_config.boltz2.precomputed_seed_scan = seed_scan_path
+        logger.info(f"Saved seed scan → {seed_scan_path}")
+    except Exception as exc:
+        logger.warning(f"Seed scan failed ({exc}); rk.refine will scan at runtime")
+        seed_scan_path = None
 
     phase1_yaml = os.path.join(output_dir, "ROCKET_config_phase1_boltz2.yaml")
     phase1_config.to_yaml_file(phase1_yaml)
@@ -589,6 +608,8 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     phase2_config.note = f"phase2_boltz2_{args.file_id}"
     phase2_config.algorithm.iterations = 500
     phase2_config.boltz2.feats_path = feats_path
+    if seed_scan_path:
+        phase2_config.boltz2.precomputed_seed_scan = seed_scan_path
 
     phase2_yaml = os.path.join(output_dir, "ROCKET_config_phase2_boltz2.yaml")
     phase2_config.to_yaml_file(phase2_yaml)
@@ -628,6 +649,10 @@ def parse_args():
     parser.add_argument("--map1", default=None)
     parser.add_argument("--map2", default=None)
     parser.add_argument("--full_composition", default=None)
+    parser.add_argument(
+        "--n_seeds_to_scan", type=int, default=9,
+        help="Number of diffusion seeds to pre-evaluate during Boltz-2 preprocessing (default 9).",
+    )
 
     args = parser.parse_args()
 
