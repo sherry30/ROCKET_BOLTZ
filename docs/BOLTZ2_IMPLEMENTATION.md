@@ -118,7 +118,16 @@ What this does internally:
 4. Superposes Boltz-2 prediction onto MR model → `ROCKET_inputs/{file_id}-pred-aligned.pdb`
 5. Generates `ROCKET_inputs/{file_id}-Edata.mtz` (normalised structure factors)
 6. Runs `prepare_boltz2_feats` → `ROCKET_inputs/feats_boltz2.pkl`
-7. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
+7. Auto-detects the R-free **test-set value** from the Edata (the minority flag
+   value) and writes it as `testset_value` in the config
+8. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
+
+**R-free convention note**: programs disagree on which flag value is the test
+set (CCP4 `FreeR_flag` uses 0, phenix `R-free-flags` uses 1).  SFcalculator
+treats `R-free-flags == testset_value` as the held-out set, so the wrong
+`testset_value` silently holds out the *work* set (Rfree≈0 or computed on the
+majority).  Preprocessing therefore detects it from the data — the test set is
+the held-out minority — rather than assuming a convention.
 
 Output layout:
 ```

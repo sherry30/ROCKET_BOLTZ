@@ -133,6 +133,29 @@ if [ "$DO_CONVERT" -eq 1 ] && [ -n "$SF_CIF" ]; then
         )
         if [ -s "$FINAL_MTZ" ]; then
             echo "  [ok ] ${ID_LO}.mtz"
+            # Some depositions carry BOTH _refln.status and pdbx_r_free_flag, so
+            # cif_as_mtz emits duplicate free columns (R-free-flags + R-free-flags-1).
+            # Downstream tools (phasertng mtz_generator) then carry NONE through,
+            # leaving the refinement with no free set (Rfree=0).  Drop the duplicates,
+            # keeping a single R-free-flags column.
+            ( cd "$DATA_DIR"
+              phenix.python - "${ID_LO}.mtz" <<'PY' > dedup_rfree.log 2>&1 || true
+import re, sys
+from iotbx import mtz
+path = sys.argv[1]
+arrays = mtz.object(file_name=path).as_miller_arrays()
+dupes = [a for a in arrays if re.match(r"R-free-flags-\d+$", a.info().labels[0])]
+if dupes:
+    keep = [a for a in arrays if a not in dupes]
+    ds = keep[0].as_mtz_dataset(column_root_label=keep[0].info().labels[0])
+    for a in keep[1:]:
+        ds.add_miller_array(a, column_root_label=a.info().labels[0])
+    ds.mtz_object().write(path)
+    print("dropped duplicate free columns:", [a.info().labels[0] for a in dupes])
+PY
+            )
+            grep -q "dropped duplicate" "$DATA_DIR/dedup_rfree.log" 2>/dev/null && \
+                echo "  de-duplicated R-free-flags column"
             ( cd "$DATA_DIR" && phenix.mtz.dump "${ID_LO}.mtz" > mtz_dump.log 2>&1 || true )
             # usable deposited free set => R-free column has a REAL split (min<max)
             read FMIN FMAX < <(awk 'tolower($1) ~ /free/ && $4 ~ /^[0-9.]+$/ {print $4,$5; exit}' "$DATA_DIR/mtz_dump.log")
