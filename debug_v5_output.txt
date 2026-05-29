@@ -1,0 +1,68 @@
+/data/dust/group/it/crystalsfirst/micromamba/envs/rocket-of/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/data/dust/group/it/crystalsfirst/micromamba/envs/rocket-of/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/data/dust/group/it/crystalsfirst/micromamba/envs/rocket-of/lib/python3.10/site-packages/torchvision/io/image.py:13: UserWarning: Failed to load image Python extension: '/data/dust/group/it/crystalsfirst/micromamba/envs/rocket-of/lib/python3.10/site-packages/torchvision/image.so: undefined symbol: _ZN3c1017RegisterOperatorsD1Ev'If you don't plan on using image functionality from `torchvision.io`, you can ignore this warning. Otherwise, there might be something wrong with your environment. Did you have `libjpeg` or `libpng` installed before building `torchvision` from source?
+  warn(
+2026-05-29 01:07:45.399 | INFO     | rocket.boltz2_wrapper:__init__:104 - Loading Boltz-2 from /data/dust/group/it/crystalsfirst/dev/shehry/boltz_cache/boltz2_conf.ckpt …
+/data/dust/group/it/crystalsfirst/micromamba/envs/rocket-of/lib/python3.10/site-packages/pytorch_lightning/utilities/migration/utils.py:56: The loaded checkpoint was produced with Lightning v2.5.0.post0, which is newer than your current Lightning version: v2.5.0
+2026-05-29 01:07:57.252 | WARNING  | SFC_Torch.Fmodel:init_mtz:364 - Unit cell from mtz file does not match that in PDB file! Using the cell info from MTZ file!
+2026-05-29 01:07:59.413 | WARNING  | SFC_Torch.Fmodel:init_mtz:364 - Unit cell from mtz file does not match that in PDB file! Using the cell info from MTZ file!
+2026-05-29 01:11:19.699 | WARNING  | SFC_Torch.Fmodel:init_mtz:364 - Unit cell from mtz file does not match that in PDB file! Using the cell info from MTZ file!
+2026-05-29 01:11:21.565 | WARNING  | SFC_Torch.Fmodel:init_mtz:364 - Unit cell from mtz file does not match that in PDB file! Using the cell info from MTZ file!
+=================================================================
+T1: Structural sensitivity: final-pass-only  vs  all-passes
+    (RMSD vs w_dev, seed=4)
+=================================================================
+ w_dev    RMSD_final      RMSD_all     ratio
+  0.02        0.0017        0.0068      3.90x
+  0.05        0.0043        0.0813     18.90x
+  0.10        0.0085        0.1208     14.27x
+  0.20        0.0713        0.1423      1.99x
+  0.30        0.1083        0.1629      1.50x
+  0.50        0.1197        0.2314      1.93x
+  1.00        0.1426        0.6064      4.25x
+  2.00        0.1911        1.5547      8.13x
+
+=================================================================
+T2: Gradient norms at identity — all-passes injection (seed=4)
+=================================================================
+  LLG=1078.3  Rwork=1.2788
+  |∇w_pair|=0.3662  (final-only was 0.3756)
+  |∇b_pair|=0.001332
+
+=================================================================
+T3: 30-iter optimisation — all-passes injection, lr=1e-4, seed=4
+=================================================================
+  iter   0: LLG=  1076.4  Rwork=1.2808  grad_norm=0.3806  w_dev=0.0128
+  iter   1: LLG=  1084.7  Rwork=1.2748  grad_norm=0.2611  w_dev=0.0236
+  iter   2: LLG=  1084.8  Rwork=1.2701  grad_norm=0.2515  w_dev=0.0343
+  iter   3: LLG=  1081.1  Rwork=1.2698  grad_norm=0.2481  w_dev=0.0451
+  iter   4: LLG=  1084.7  Rwork=1.2699  grad_norm=0.2573  w_dev=0.0559
+  iter   5: LLG=  1083.7  Rwork=1.2673  grad_norm=0.2402  w_dev=0.0666
+  iter   6: LLG=  1081.1  Rwork=1.2727  grad_norm=0.2636  w_dev=0.0772
+  iter   7: LLG=  1061.3  Rwork=1.2729  grad_norm=0.2767  w_dev=0.0876
+  iter   8: LLG=  1053.3  Rwork=1.2697  grad_norm=0.2900  w_dev=0.0979
+  iter   9: LLG=  1044.3  Rwork=1.2707  grad_norm=0.2965  w_dev=0.1082
+  iter  10: LLG=  1046.2  Rwork=1.2723  grad_norm=0.3147  w_dev=0.1183
+  iter  11: LLG=  1033.6  Rwork=1.2739  grad_norm=0.3101  w_dev=0.1283
+  iter  12: LLG=  1031.5  Rwork=1.2765  grad_norm=0.2833  w_dev=0.1381
+  iter  13: LLG=  1027.8  Rwork=1.2722  grad_norm=0.2669  w_dev=0.1479
+  iter  14: LLG=  1027.5  Rwork=1.2727  grad_norm=0.2573  w_dev=0.1576
+  iter  15: LLG=  1027.9  Rwork=1.2724  grad_norm=0.2617  w_dev=0.1671
+  iter  16: LLG=  1056.1  Rwork=1.2701  grad_norm=0.2888  w_dev=0.1765
+  iter  17: LLG=  1062.5  Rwork=1.2749  grad_norm=0.2537  w_dev=0.1858
+  iter  18: LLG=  1061.3  Rwork=1.2729  grad_norm=0.2446  w_dev=0.1948
+  iter  19: LLG=  1062.4  Rwork=1.2741  grad_norm=0.2405  w_dev=0.2037
+  iter  20: LLG=  1057.5  Rwork=1.2715  grad_norm=0.2524  w_dev=0.2125
+  iter  21: LLG=  1057.4  Rwork=1.2728  grad_norm=0.2618  w_dev=0.2213
+  iter  22: LLG=  1055.2  Rwork=1.2770  grad_norm=0.2662  w_dev=0.2300
+  iter  23: LLG=  1059.2  Rwork=1.2776  grad_norm=0.2724  w_dev=0.2387
+  iter  24: LLG=  1054.4  Rwork=1.2659  grad_norm=0.2596  w_dev=0.2473
+  iter  25: LLG=  1041.2  Rwork=1.2742  grad_norm=0.2353  w_dev=0.2559
+  iter  26: LLG=  1039.2  Rwork=1.2766  grad_norm=0.2160  w_dev=0.2644
+  iter  27: LLG=  1037.0  Rwork=1.2665  grad_norm=0.2098  w_dev=0.2729
+  iter  28: LLG=  1032.1  Rwork=1.2732  grad_norm=0.2101  w_dev=0.2812
+  iter  29: LLG=  1028.1  Rwork=1.2745  grad_norm=0.2112  w_dev=0.2896
+
+  Best LLG = 1084.8 at iter 2

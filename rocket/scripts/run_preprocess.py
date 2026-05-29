@@ -578,6 +578,8 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
             boltz2_recycling_steps=3,
             boltz2_num_sampling_steps=200,
             feats_path=feats_path,
+            sampling_mode=getattr(args, "sampling_mode", "ddim"),
+            ddim_steps=getattr(args, "ddim_steps", 20),
         ),
     )
     if seg_id:
@@ -652,6 +654,16 @@ def parse_args():
     parser.add_argument(
         "--n_seeds_to_scan", type=int, default=9,
         help="Number of diffusion seeds to pre-evaluate during Boltz-2 preprocessing (default 9).",
+    )
+    parser.add_argument(
+        "--sampling_mode", choices=["truncated_bptt", "single_step", "ddim"],
+        default="ddim",
+        help="Boltz-2 gradient mode: truncated_bptt (original TBPTT), "
+             "single_step (ConForNets one-step), or ddim (deterministic N-step). Default: ddim.",
+    )
+    parser.add_argument(
+        "--ddim_steps", type=int, default=20,
+        help="Number of deterministic DDIM steps when --sampling_mode=ddim (default 20).",
     )
 
     args = parser.parse_args()

@@ -109,10 +109,12 @@ def precompute_boltz2_seeds(
     cra_name      = sfc.cra_name
     RBR_LBFGS     = config.rbr_opt_algorithm == "lbfgs"
 
-    K           = getattr(config, "truncated_backprop_steps", 5)
-    n_recycling = getattr(config, "boltz2_recycling_steps", config.init_recycling)
-    n_sampling  = getattr(config, "boltz2_num_sampling_steps", 200)
-    boltz2_ckpt = getattr(config, "boltz2_checkpoint_path", None)
+    K             = getattr(config, "truncated_backprop_steps", 5)
+    n_recycling   = getattr(config, "boltz2_recycling_steps", config.init_recycling)
+    n_sampling    = getattr(config, "boltz2_num_sampling_steps", 200)
+    boltz2_ckpt   = getattr(config, "boltz2_checkpoint_path", None)
+    sampling_mode = getattr(config, "sampling_mode", "truncated_bptt")
+    ddim_steps    = getattr(config, "ddim_steps", 20)
 
     wrapper = Boltz2PairBias(
         checkpoint_path=boltz2_ckpt,
@@ -120,6 +122,8 @@ def precompute_boltz2_seeds(
         diffusion_seed=0,
         num_sampling_steps=n_sampling,
         recycling_steps=n_recycling,
+        sampling_mode=sampling_mode,
+        ddim_steps=ddim_steps,
         device=device,
     ).to(device).eval()
     wrapper.init_bias(device)
@@ -310,10 +314,15 @@ def run_boltz2_xray_refinement(
     # 3. Boltz-2 model and feats
     # ------------------------------------------------------------------
     # Resolve checkpoint path
-    boltz2_ckpt = getattr(config, "boltz2_checkpoint_path", None)
-    K = getattr(config, "truncated_backprop_steps", 5)
-    n_recycling = getattr(config, "boltz2_recycling_steps", config.init_recycling)
-    n_sampling  = getattr(config, "boltz2_num_sampling_steps", 200)
+    boltz2_ckpt   = getattr(config, "boltz2_checkpoint_path", None)
+    K             = getattr(config, "truncated_backprop_steps", 5)
+    n_recycling   = getattr(config, "boltz2_recycling_steps", config.init_recycling)
+    n_sampling    = getattr(config, "boltz2_num_sampling_steps", 200)
+    sampling_mode = getattr(config, "sampling_mode", "truncated_bptt")
+    ddim_steps    = getattr(config, "ddim_steps", 20)
+
+    logger.info(f"Boltz-2 sampling mode: {sampling_mode}"
+                + (f" (ddim_steps={ddim_steps})" if sampling_mode == "ddim" else ""))
 
     wrapper = Boltz2PairBias(
         checkpoint_path=boltz2_ckpt,
@@ -321,6 +330,8 @@ def run_boltz2_xray_refinement(
         diffusion_seed=0,             # overridden per run below
         num_sampling_steps=n_sampling,
         recycling_steps=n_recycling,
+        sampling_mode=sampling_mode,
+        ddim_steps=ddim_steps,
         device=device,
     )
     wrapper = wrapper.to(device)

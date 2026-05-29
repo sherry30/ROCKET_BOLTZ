@@ -130,6 +130,11 @@ class Boltz2Config(BaseModel):
     boltz2_num_sampling_steps: int = 200
     feats_path: str | None = None
     precomputed_seed_scan: str | None = None  # path to ROCKET_inputs/seed_scan.npy
+    # Sampling mode: "truncated_bptt" | "single_step" | "ddim"
+    # single_step: one deterministic denoising call at σ_max (ConForNets approach)
+    # ddim: N deterministic DDIM steps; cleaner gradient than truncated_bptt
+    sampling_mode: str = "truncated_bptt"
+    ddim_steps: int = 20  # number of steps for "ddim" mode
 
 
 class MonitoringConfig(BaseModel):
