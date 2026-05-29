@@ -231,6 +231,8 @@ class RocketRefinmentConfig(BaseModel):
         "boltz2_num_sampling_steps": "boltz2.boltz2_num_sampling_steps",
         "feats_path":                "boltz2.feats_path",
         "precomputed_seed_scan":     "boltz2.precomputed_seed_scan",
+        "sampling_mode":             "boltz2.sampling_mode",
+        "ddim_steps":                "boltz2.ddim_steps",
         # Metadata
         "note": "note",
     }

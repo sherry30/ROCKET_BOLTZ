@@ -614,7 +614,7 @@ def run_boltz2_xray_refinement(
                 NEG_LLG=f"{llg_estimate:.2f}",
                 Rwork=f"{r_work.item():.3f}",
                 Rfree=f"{r_free.item():.3f}",
-                mem=f"{torch.cuda.max_memory_allocated() / 1024**3:.1f}G",
+                mem=f"{torch.cuda.max_memory_allocated(device=device) / 1024**3:.1f}G",
             )
 
             wandb_logger.log(
@@ -622,7 +622,7 @@ def run_boltz2_xray_refinement(
                     f"{run_id}/neg_llg":     llg_estimate,
                     f"{run_id}/rwork":       r_work.item(),
                     f"{run_id}/rfree":       r_free.item(),
-                    f"{run_id}/gpu_mem_gb":  torch.cuda.max_memory_allocated() / 1024**3,
+                    f"{run_id}/gpu_mem_gb":  torch.cuda.max_memory_allocated(device=device) / 1024**3,
                     f"{run_id}/iter_sec":    time.time() - start_time,
                 },
                 step=iteration,
@@ -657,7 +657,7 @@ def run_boltz2_xray_refinement(
             optimizer.step()
 
             time_by_epoch.append(time.time() - start_time)
-            memory_by_epoch.append(torch.cuda.max_memory_allocated() / 1024**3)
+            memory_by_epoch.append(torch.cuda.max_memory_allocated(device=device) / 1024**3)
 
         # ------------------------------------------------------------------
         # 5b. Save per-run data
