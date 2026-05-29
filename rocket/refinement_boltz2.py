@@ -83,6 +83,20 @@ def run_boltz2_xray_refinement(
     except Exception as err:
         raise ValueError(f"input_pdb path is not valid: {config.input_pdb}") from err
 
+    # Safety net for the R-free convention: testset_value defines which
+    # reflections are held out, and a stale or hand-copied config (e.g. an old
+    # phase-2 yaml that predates auto-detection) can carry the wrong value and
+    # silently cross-validate against the wrong set.  Re-detect it from the
+    # actual Edata and auto-correct with a clear warning.
+    detected_testset = rkrf_utils.detect_testset_value(tng_file, config.free_flag)
+    if detected_testset != config.testset_value:
+        logger.warning(
+            f"config testset_value={config.testset_value} disagrees with "
+            f"{os.path.basename(tng_file)} (detected {detected_testset}); using "
+            f"{detected_testset}. Re-run rk.preprocess to fix the config on disk."
+        )
+        config.data.testset_value = detected_testset
+
     # Output directory
     if config.uuid_hex:
         run_uuid = config.uuid_hex

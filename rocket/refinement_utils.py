@@ -1,16 +1,59 @@
 import glob
+import os
 import pickle
 import re
 
 import numpy as np
 import skbio
 import torch
+from loguru import logger
 from SFC_Torch import PDBParser
 
 import rocket
 from rocket import coordinates as rk_coordinates
 from rocket import utils as rk_utils
 from rocket.xtal import utils as llg_utils
+
+
+def detect_testset_value(mtz_path: str, free_label: str = "R-free-flags") -> int:
+    """Detect the R-free *test-set* flag value from the data.
+
+    R-free conventions differ between programs (CCP4 ``FreeR_flag`` marks the
+    test set with 0, phenix ``R-free-flags`` with 1), so we never assume.  The
+    test set is the held-out minority, so we return the least-frequent flag
+    value.  Falls back to 1 if the column is missing or has no real split.
+
+    Shared by ``rk.preprocess`` (to set ``testset_value`` in the generated
+    configs) and ``rk.refine`` (to validate/auto-correct a stale config against
+    the actual Edata).
+    """
+    try:
+        import reciprocalspaceship as rs
+
+        ds = rs.read_mtz(mtz_path)
+        if free_label not in ds.columns:
+            logger.warning(
+                f"No '{free_label}' column in {os.path.basename(mtz_path)}; "
+                "using testset_value=1."
+            )
+            return 1
+        counts = ds[free_label].value_counts()
+        if len(counts) < 2:
+            logger.warning(
+                f"'{free_label}' has a single value in {os.path.basename(mtz_path)} "
+                "(no work/free split); using testset_value=1."
+            )
+            return 1
+        test_value = int(counts.idxmin())
+        frac = float(counts.min()) / float(counts.sum())
+        logger.info(
+            f"Detected R-free test-set value = {test_value} "
+            f"({frac * 100:.1f}% held out) from {os.path.basename(mtz_path)}"
+        )
+        return test_value
+    except Exception as exc:
+        logger.warning(f"Could not detect testset_value ({exc}); using 1.")
+        return 1
 
 
 def generate_feature_dict(

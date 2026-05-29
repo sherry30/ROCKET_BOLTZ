@@ -119,15 +119,23 @@ What this does internally:
 5. Generates `ROCKET_inputs/{file_id}-Edata.mtz` (normalised structure factors)
 6. Runs `prepare_boltz2_feats` → `ROCKET_inputs/feats_boltz2.pkl`
 7. Auto-detects the R-free **test-set value** from the Edata (the minority flag
-   value) and writes it as `testset_value` in the config
+   value) and writes it as `testset_value` in **both** the phase-1 **and**
+   phase-2 configs
 8. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
 
 **R-free convention note**: programs disagree on which flag value is the test
 set (CCP4 `FreeR_flag` uses 0, phenix `R-free-flags` uses 1).  SFcalculator
 treats `R-free-flags == testset_value` as the held-out set, so the wrong
 `testset_value` silently holds out the *work* set (Rfree≈0 or computed on the
-majority).  Preprocessing therefore detects it from the data — the test set is
-the held-out minority — rather than assuming a convention.
+majority).  Detection lives in `refinement_utils.detect_testset_value` (the test
+set is the held-out minority) and is applied in two places:
+
+* **Preprocess** writes the detected value into both phase configs (phase 2
+  sets it explicitly, not just via the config copy).
+* **`rk.refine`** re-detects from the Edata at startup and **auto-corrects**
+  `testset_value` with a warning if the loaded config disagrees — so a stale or
+  hand-copied config (e.g. an old phase-2 yaml) can never silently cross-validate
+  against the wrong reflection set.
 
 Output layout:
 ```
@@ -280,6 +288,25 @@ This encodes **both amplitude and phase error**.  Random model → R ≈ 1.41.
 Perfect model → R ≈ 0.  A starting model with R ≈ 1.27 corresponds to ~78°
 average phase error, which is a plausible starting point for Phaser MR + Boltz-2.
 This is NOT the same as conventional crystallographic Rwork (random ≈ 0.83).
+
+## Benchmarking & external comparison
+
+`tools/benchmark_rocket.sh` scores a refined model against experimental data and
+a deposited structure: raw R → `phenix.refine` → refined R → (optional map CC)
+→ RMSD → CrystalBoltz CC.  It calls two helpers (both need the `rocket-of` env):
+
+* `tools/rmsd_breakdown.py` — paper-comparable **Global (all-atom) + Cα RMSD**
+  (`gemmi`, sequence-aligned, no trimming) plus a per-residue core-vs-outlier
+  breakdown (median, % within 1/2 Å, worst residue, core RMSD).  Quote these,
+  not `phenix.superpose_pdbs`, which de-weights flexible outliers and reads low.
+* `tools/crystalboltz_cc.py` — the CrystalBoltz (arXiv:2605.15564) **CC**:
+  reciprocal-space `pearson(|Fc|, |Fo|)` with the bulk-solvent forward model via
+  `SFC_Torch` (fitted scales).  Prefers FEFF amplitudes; French-Wilson converts
+  intensities.  This is distinct from the real-space map-model CC (RSCC) of
+  `phenix.map_correlations` (step 5), which the paper does not use.
+
+See `BOLTZ2_PAIR_BIAS_ANALYSIS.md` (§6–7) for the 8DWN four-mode results vs
+CrystalBoltz.
 
 ## Python API
 

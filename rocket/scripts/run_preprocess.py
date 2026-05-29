@@ -523,40 +523,14 @@ def run_boltz2_predict(
 
 
 def _detect_testset_value(mtz_path: str, free_label: str = "R-free-flags") -> int:
-    """Detect the R-free *test-set* flag value from the data.
+    """Detect the R-free test-set flag value from the data.
 
-    R-free conventions differ between programs (CCP4 ``FreeR_flag`` marks the
-    test set with 0, phenix ``R-free-flags`` with 1), so we never assume.  The
-    test set is the held-out minority, so we return the least-frequent flag
-    value.  Falls back to 1 if the column is missing or has no real split.
+    Thin wrapper around ``refinement_utils.detect_testset_value`` so that
+    preprocessing and refinement share one implementation.
     """
-    try:
-        import reciprocalspaceship as rs
+    from ..refinement_utils import detect_testset_value
 
-        ds = rs.read_mtz(mtz_path)
-        if free_label not in ds.columns:
-            logger.warning(
-                f"No '{free_label}' column in {os.path.basename(mtz_path)}; "
-                "using testset_value=1."
-            )
-            return 1
-        counts = ds[free_label].value_counts()
-        if len(counts) < 2:
-            logger.warning(
-                f"'{free_label}' has a single value in {os.path.basename(mtz_path)} "
-                "(no work/free split); using testset_value=1."
-            )
-            return 1
-        test_value = int(counts.idxmin())
-        frac = float(counts.min()) / float(counts.sum())
-        logger.info(
-            f"Detected R-free test-set value = {test_value} "
-            f"({frac * 100:.1f}% held out) from {os.path.basename(mtz_path)}"
-        )
-        return test_value
-    except Exception as exc:
-        logger.warning(f"Could not detect testset_value ({exc}); using 1.")
-        return 1
+    return detect_testset_value(mtz_path, free_label)
 
 
 def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
@@ -653,6 +627,10 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     phase2_config.note = f"phase2_boltz2_{args.file_id}"
     phase2_config.algorithm.iterations = 500
     phase2_config.boltz2.feats_path = feats_path
+    # Carry the detected R-free convention explicitly (don't rely on the copy
+    # inheriting it) so phase 2 holds out the same test set as phase 1.
+    phase2_config.data.testset_value = testset_value
+    phase2_config.data.free_flag = phase1_config.data.free_flag
 
     phase2_yaml = os.path.join(output_dir, "ROCKET_config_phase2_boltz2.yaml")
     phase2_config.to_yaml_file(phase2_yaml)

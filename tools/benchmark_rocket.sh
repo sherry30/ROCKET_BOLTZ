@@ -10,7 +10,8 @@
 #   3. phenix.refine     — N macrocycles (in ref frame if superposed)
 #   4. REFINED R-factors — practical end-quality
 #   5. map-model CC (RSCC) vs ref_mtz map — refined model, in-frame [needs --ref-mtz]
-#   6. refined-vs-truth RMSD (post-refine accuracy)                 [needs --ref-pdb]
+#   6. refined-vs-truth RMSD + per-residue breakdown                [needs --ref-pdb]
+#   7. CrystalBoltz CC   — Pearson(|Fc|,|Fo|), bulk-solvent (refined model)
 #
 # Why superpose BEFORE refine (when a ground-truth pdb is given):
 #   map-model CC compares to a phased MAP, which is tied to the ground-truth
@@ -26,6 +27,8 @@
 # ============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
 cat <<EOF
 Usage: $0 --pdb <model.pdb> --label <name> --exp-mtz <data.mtz> [options]
@@ -40,6 +43,13 @@ Ground-truth (optional — enables RMSD + RSCC):
   --ref-mtz       PATH    ground-truth map-coeff MTZ (for map-model CC / RSCC)
   --ref-map-labels STR    map coeff labels in ref-mtz       [default: FWT,PHWT]
   --resolution    FLOAT   resolution for map-model CC (A)   [default: 2.0]
+
+CrystalBoltz-style CC (Pearson |Fc| vs |Fo|, reciprocal space, bulk-solvent):
+  --cc-mtz        PATH    amplitude MTZ for the CC      [default: --exp-mtz]
+  --cc-fobs       STR     |Fo| amplitude label              [default: auto]
+  --cc-sigf       STR     sigma label                       [default: auto]
+                          (auto prefers FEFF; French-Wilson if only intensities)
+  --no-cc                 skip the CrystalBoltz CC metric
 
 Refinement / data options:
   --free-label    STR     R-free flags label in exp-mtz     [default: R-free-flags]
@@ -68,6 +78,7 @@ REF_PDB=""; REF_MTZ=""; REF_MAP_LABELS="FWT,PHWT"; RESOLUTION="2.0"
 FREE_LABEL="R-free-flags"; MACROCYCLES="5"
 STRATEGY="individual_sites+individual_adp+occupancies"
 OUTDIR=""; SKIP_REFINE=0
+CC_MTZ=""; CC_FOBS=""; CC_SIGF=""; NO_CC=0
 
 # ---- parse flags ----------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -84,6 +95,10 @@ while [ $# -gt 0 ]; do
         --strategy)       STRATEGY="$2"; shift 2;;
         --outdir)         OUTDIR="$2"; shift 2;;
         --skip-refine)    SKIP_REFINE=1; shift;;
+        --cc-mtz)         CC_MTZ="$2"; shift 2;;
+        --cc-fobs)        CC_FOBS="$2"; shift 2;;
+        --cc-sigf)        CC_SIGF="$2"; shift 2;;
+        --no-cc)          NO_CC=1; shift;;
         -h|--help)        usage;;
         *) echo "Unknown option: $1"; usage;;
     esac
@@ -102,6 +117,8 @@ PDB=$(readlink -f "$PDB")
 EXP_MTZ=$(readlink -f "$EXP_MTZ")
 [ -n "$REF_PDB" ] && REF_PDB=$(readlink -f "$REF_PDB")
 [ -n "$REF_MTZ" ] && REF_MTZ=$(readlink -f "$REF_MTZ")
+[ -z "$CC_MTZ" ] && CC_MTZ="$EXP_MTZ"
+[ -n "$CC_MTZ" ] && CC_MTZ=$(readlink -f "$CC_MTZ")
 [ -z "$OUTDIR" ] && OUTDIR="benchmark_${LABEL}"
 
 mkdir -p "$OUTDIR"; cd "$OUTDIR"
@@ -110,12 +127,35 @@ SUMMARY="SUMMARY.txt"; : > "$SUMMARY"
 log()  { echo "$@" | tee -a "$SUMMARY"; }
 grab() { grep -E "^  r_work|^  r_free" "$1" | head -2 | sed 's/^/    /'; }
 
+# Paper-comparable RMSD (Global all-atom + Cα) + per-residue core-vs-outlier
+# breakdown.  Sequence-aligned, NO outlier trimming — matches how papers report
+# "Global RMSD" / "Cα RMSD".  NOTE: phenix.superpose_pdbs's "between fixed and
+# moving" / "all matching atoms" numbers run LOWER because it fits on
+# complete-backbone residues over an LS subset, de-weighting a few flexible
+# outliers — those are NOT the paper's all-residue metric, so quote these.
+paper_rmsd() {  # $1 model.pdb   $2 ref.pdb
+    python3 "$SCRIPT_DIR/rmsd_breakdown.py" "$1" "$2" 2>/dev/null \
+        || echo "    (RMSD breakdown failed — needs gemmi+biopython env)"
+}
+
+# CrystalBoltz CC: Pearson(|Fc|,|Fo|) with bulk-solvent forward model (SFC_Torch).
+# Reciprocal-space amplitude correlation, NOT a real-space map CC.
+paper_cc() {  # $1 model.pdb
+    [ "$NO_CC" -eq 1 ] && return 0
+    local args=(); [ -n "$CC_FOBS" ] && args+=(--fobs "$CC_FOBS")
+    [ -n "$CC_SIGF" ] && args+=(--sigf "$CC_SIGF")
+    [ -n "$FREE_LABEL" ] && args+=(--free "$FREE_LABEL")
+    python3 "$SCRIPT_DIR/crystalboltz_cc.py" "$1" "$CC_MTZ" "${args[@]}" 2>/dev/null \
+        || echo "    (CC failed — needs SFC_Torch env / amplitude MTZ)"
+}
+
 log "============================================================"
 log " BENCHMARK: $LABEL"
 log " input:   $PDB"
 log " exp-mtz: $EXP_MTZ"
 log " ref-pdb: ${REF_PDB:-<none>}"
 log " ref-mtz: ${REF_MTZ:-<none>}"
+[ "$NO_CC" -eq 0 ] && log " cc-mtz:  $CC_MTZ"
 log " date:    $(date)"
 log "============================================================"
 
@@ -139,8 +179,14 @@ if [ "$SKIP_REFINE" -eq 1 ]; then
         phenix.superpose_pdbs "$REF_PDB" input.pdb \
             file_name=superposed_norefine.pdb > skip_superpose.log 2>&1 || true
         grep -iE "rmsd|r.m.s" skip_superpose.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
+        paper_rmsd input.pdb "$REF_PDB" | tee -a "$SUMMARY"
     else
         log "[RMSD] skipped (no --ref-pdb)"
+    fi
+    log ""
+    if [ "$NO_CC" -eq 0 ]; then
+        log "[CC] CrystalBoltz CC (raw model)"
+        paper_cc input.pdb | tee -a "$SUMMARY"
     fi
     log ""; log "[refine/map-CC] skipped (--skip-refine)"
     log "DONE. Logs in $(pwd)"; exit 0
@@ -210,14 +256,28 @@ else
 fi
 
 # ---- 6. refined-vs-truth RMSD (post-refine accuracy) ----------------------
+# phenix.superpose_pdbs's reported RMSD runs LOW: it fits on complete-backbone
+# residues over an LS subset, de-weighting a few flexible outliers.  paper_rmsd
+# (no trimming, sequence-aligned) is the value to quote against papers: Global
+# (all-atom) + Cα RMSD, plus a per-residue core-vs-outlier breakdown.
 log ""
 if [ -n "$REF_PDB" ] && [ -n "${REFINED_PDB:-}" ]; then
     log "[6] Refined model vs ground truth — RMSD (post-refine accuracy)"
     phenix.superpose_pdbs "$REF_PDB" "$REFINED_PDB" \
         file_name=refined_superposed.pdb > 6_superpose_refined.log 2>&1 || true
     grep -iE "rmsd|r.m.s" 6_superpose_refined.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
+    paper_rmsd "$REFINED_PDB" "$REF_PDB" | tee -a "$SUMMARY"
 else
     log "[6] skipped (no --ref-pdb or no refined model)"
+fi
+
+# ---- 7. CrystalBoltz CC (refined model) -----------------------------------
+log ""
+if [ "$NO_CC" -eq 0 ] && [ -n "${REFINED_PDB:-}" ]; then
+    log "[7] CrystalBoltz CC — Pearson(|Fc|,|Fo|), bulk-solvent (refined model)"
+    paper_cc "$REFINED_PDB" | tee -a "$SUMMARY"
+elif [ "$NO_CC" -eq 0 ]; then
+    log "[7] CC skipped (no refined model)"
 fi
 
 log ""
