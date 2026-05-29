@@ -188,20 +188,45 @@ execution:
   model: boltz2              # selects Boltz-2 backend
 
 boltz2:
+  # always used
   boltz2_checkpoint_path: /path/to/boltz2_conf.ckpt
   feats_path: /path/to/feats_boltz2.pkl   # auto-loaded by rk.refine
-  truncated_backprop_steps: 20            # K: grad steps for truncated_bptt mode
-  boltz2_recycling_steps: 3               # trunk recycling iterations
-  boltz2_num_sampling_steps: 200          # total diffusion steps T
+  boltz2_recycling_steps: 10              # trunk recycling iterations
+  # sampler selection
   sampling_mode: ddim                     # truncated_bptt | single_step | ddim
-  ddim_steps: 20                          # deterministic steps for ddim mode
-  reuse_phase1_seed: true                 # phase 2: continue from phase-1's seed
+  # diffusion knobs (only the ones for the chosen mode are read — see table)
+  diffusion_steps: 50                     # #denoising steps (all trajectory modes); keep ~20-50 for full-grad ddim
+  backprop_last_k: null                   # ddim & truncated_bptt: grad through last K steps; null = all
+  # phase 2 only
+  reuse_phase1_seed: true                 # continue from phase-1's seed
 ```
 
-**Sampling mode note**: `ddim` (deterministic N-step) gives the cleanest gradient
-and the best real R-factor improvement; `single_step` (ConForNets-style) also
-works; `truncated_bptt` (the original K-step stochastic mode) does not improve
-real R-factors.  See `BOLTZ2_PAIR_BIAS_ANALYSIS.md` for the full comparison.
+There are just **two diffusion knobs**: `diffusion_steps` (how many denoising
+steps) and `backprop_last_k` (how many trailing steps keep the gradient; `null`
+⇒ all).
+
+**Which knob applies to which mode** (`—` = ignored):
+
+| `sampling_mode` | `diffusion_steps` | `backprop_last_k` | gradient |
+|---|---|---|---|
+| `single_step` | — | — | full (1 step at σ_max) |
+| `ddim` *(recommended)* | **used** | **used** (`null` = all) | through last K steps (deterministic) |
+| `truncated_bptt` | **used** | **used** (`null` = all) | through last K steps (stochastic) |
+
+**`ddim` covers both the old `ddim` and `ddim_truncated`**: they were proven
+identical when K = number of steps, so they're merged.
+- *Full-gradient DDIM* (recommended): `diffusion_steps: 50`, `backprop_last_k: null` —
+  clean gradient through all steps; keep the step count small since every step
+  retains the autograd graph.
+- *Truncated-backprop DDIM* (benchmark): `diffusion_steps: 200`,
+  `backprop_last_k: 20` — same deterministic trajectory, gradient through only
+  the last 20 steps (O(K) backward memory); isolates "deterministic trajectory +
+  last-K gradient" from `truncated_bptt`'s stochastic trajectory.
+
+**Sampling mode note**: `ddim` gives the cleanest gradient and the best real
+R-factor improvement; `single_step` (ConForNets-style) also works;
+`truncated_bptt` (the original stochastic mode) does not improve real R-factors.
+See `BOLTZ2_PAIR_BIAS_ANALYSIS.md` for the full comparison.
 
 **Seed pre-scan**: runs **inline** at the start of `rk.refine`, in the same
 sampling mode as refinement (see "Seed pre-scan" under Optimization details).
@@ -248,6 +273,42 @@ Phase-2 config differences vs Phase-1:
 ---
 
 ## Optimization details
+
+### Why the sampler is reimplemented (not boltz's `sample()`)
+
+The diffusion **math** in `_sample_truncated` (and `_sample_ddim` /
+`_sample_one_step`) is identical to boltz's
+`AtomDiffusion.sample()` — the EDM/Karras update is copied verbatim: same
+`sample_schedule`, same `t_hat = σ·(1+γ)`, same `noise_var`, same
+`preconditioned_network_forward`, same `weighted_rigid_align`, same Euler step
+`x + step_scale·(σ_t − t_hat)·(x_noisy − x_denoised)/t_hat`. We are **not**
+sampling differently.
+
+We cannot just call `sample()` because it is built for inference, and ROCKET
+needs four things it does not offer:
+
+1. **Gradients.** `sample()` wraps the entire denoising loop in
+   `with torch.no_grad():`. ROCKET must backprop from the final coordinates →
+   diffusion net → `z_biased` → `w_pair`/`b_pair`. Our loop selectively enables
+   grad on the last K steps (`use_grad = step_idx >= detach_boundary`). That
+   alone makes `sample()` unusable.
+2. **No per-step coordinate augmentation.** `sample()` applies a random rigid
+   rotation+translation to the coords at the *start of every step*
+   (unconditional). For generation that is harmless; for us it randomises the
+   frame each step and scrambles the gradient w.r.t. the bias (the LLG is
+   computed in a fixed crystallographic frame after Kabsch alignment). We omit
+   it entirely.
+3. **Seeded, reproducible initial noise.** We fix
+   `torch.manual_seed(diffusion_seed)` for the noise draw so the trajectory is
+   identical across optimisation steps — otherwise the bias signal drowns in
+   seed-to-seed variance. `sample()` uses the ambient RNG.
+4. **None of the steering machinery.** `sample()` is tangled with FK-steering,
+   physical/contact guidance potentials, multiplicity, parallel-sample chunking
+   and resampling — all irrelevant to ROCKET. We strip to the bare loop.
+
+So the sampler is a reimplementation that adds gradient control and determinism
+and removes inference-only scaffolding — numerically the same diffusion in the
+no-grad steps, not a different algorithm.
 
 ### LR scheduling (smooth stage)
 

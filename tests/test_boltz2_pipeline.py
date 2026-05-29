@@ -43,8 +43,7 @@ CUDA_DEVICE = os.environ.get("ROCKET_TEST_DEVICE", "cuda:0")
 
 # Short, fast sampling settings for the smoke test.
 SAMPLING_MODE = "ddim"
-DDIM_STEPS = 5
-NUM_SAMPLING_STEPS = 20
+NUM_SAMPLING_STEPS = 5   # ddim runs this many steps (single step knob)
 RECYCLING_STEPS = 1
 DIFFUSION_SEED = 42
 
@@ -72,7 +71,6 @@ def _make_wrapper(device: str):
         num_sampling_steps=NUM_SAMPLING_STEPS,
         recycling_steps=RECYCLING_STEPS,
         sampling_mode=SAMPLING_MODE,
-        ddim_steps=DDIM_STEPS,
         device=device,
     ).to(device).eval()
     wrapper.init_bias(device)

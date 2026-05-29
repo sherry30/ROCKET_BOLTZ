@@ -48,12 +48,26 @@ Selectable at `rk.refine` time (`boltz2.sampling_mode`):
 
 | mode | what it does | determinism | gradient path |
 |---|---|---|---|
-| `truncated_bptt` | original EDM/Karras sampler with stochastic γ-churn; backprop through the last *K* steps | **stochastic** — different trajectory each iteration | noisy, last-K only |
+| `truncated_bptt` | original EDM/Karras sampler with stochastic γ-churn over `diffusion_steps`; backprop through the last *K* steps (`backprop_last_k`; `null` = all) | **stochastic** — different trajectory each iteration | noisy, last-K only |
 | `single_step` | one deterministic denoise at σ_max (ConForNets style) | deterministic | clean, 1 step |
-| `ddim` | *N* deterministic DDIM steps, noise seed fixed once, gradient through all steps | deterministic | clean, full-trajectory |
+| `ddim` | `diffusion_steps` deterministic DDIM steps, noise seed fixed once; gradient through the last *K* steps (`backprop_last_k`; `null` = all) | deterministic | clean, last-K (or all) |
 
-`ddim_steps` controls *N* (20 default; 50 tested). Coordinate augmentation is
-disabled during ROCKET so the only stochasticity is the diffusion churn itself.
+Two knobs: `diffusion_steps` (how many denoising steps) and `backprop_last_k`
+(how many trailing steps keep the gradient; `null` = all).  Coordinate
+augmentation is disabled during ROCKET so the only stochasticity is the diffusion
+churn itself (present only in `truncated_bptt`).
+
+`ddim` covers two regimes via `backprop_last_k`:
+
+* **Full-gradient DDIM** (`backprop_last_k: null`, `diffusion_steps` ~20–50):
+  clean gradient through every step — the recommended default.
+* **Truncated-backprop DDIM** (`diffusion_steps: 200`, `backprop_last_k: 20`):
+  same deterministic trajectory, gradient only through the last 20 steps (O(K)
+  backward memory).  This is the benchmark that decomposes the two factors
+  behind `truncated_bptt`'s failure — it keeps the *last-K gradient* but swaps
+  the *stochastic* trajectory for a *deterministic* one.  (The two were proven
+  identical when K = number of steps, so the old separate `ddim_truncated` mode
+  was merged into `ddim`.)
 
 ---
 

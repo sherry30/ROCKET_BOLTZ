@@ -60,7 +60,7 @@ class Boltz2PairBias(nn.Module):
 
     applied to the pre-PairFormer pair representation z [B, N, N, 128].
 
-    Three sampling modes control how gradients flow back to w_pair/b_pair:
+    Sampling modes control how gradients flow back to w_pair/b_pair:
 
     ``"truncated_bptt"``
         Full 200-step stochastic reverse diffusion; gradients retained only
@@ -74,21 +74,31 @@ class Boltz2PairBias(nn.Module):
         Inspired by ConForNets (arXiv:2604.18559).
 
     ``"ddim"`` (recommended)
-        N deterministic DDIM steps with fixed initial noise; the gradient flows
-        through all N steps and the PairFormer.  Sharper structural prediction
-        than single-step while keeping the gradient fully deterministic.
-        N is set by ``ddim_steps`` (default 20).
+        ``num_sampling_steps`` deterministic DDIM steps with fixed initial noise.
+        Gradient is retained through the last ``truncated_backprop_steps`` (K)
+        steps; ``K = None`` (or K ≥ N) keeps the gradient through ALL steps (the
+        full-gradient DDIM).  A smaller K with a long trajectory is the
+        truncated-backprop variant — same deterministic forward trajectory, just
+        a shorter autograd graph (O(K) backward memory).  Fully deterministic, so
+        the gradient is clean.  Keep ``num_sampling_steps`` modest (≈20–50) when
+        K = all, since every step then retains the graph.
+
+    All trajectory modes use a single step count, ``num_sampling_steps`` (config
+    ``diffusion_steps``); there is no separate ddim-only step knob.
 
     Parameters
     ----------
     checkpoint_path:
         Path to the boltz2_conf.ckpt checkpoint.
     truncated_backprop_steps:
-        K for ``"truncated_bptt"`` mode.  Ignored for other modes.
+        K — number of trailing steps that keep the gradient, for ``"ddim"`` and
+        ``"truncated_bptt"``.  ``None`` keeps the gradient through all steps.
+        Ignored by ``"single_step"``.
+    num_sampling_steps:
+        Number of diffusion steps for every trajectory mode (config
+        ``diffusion_steps``).  Ignored by ``"single_step"``.
     sampling_mode:
         ``"truncated_bptt"`` | ``"single_step"`` | ``"ddim"``
-    ddim_steps:
-        Number of deterministic steps for ``"ddim"`` mode.
     diffusion_seed:
         Fixed RNG seed for the initial noise draw.  Same seed is used at every
         optimisation step — the only source of randomness between calls is the
@@ -103,7 +113,6 @@ class Boltz2PairBias(nn.Module):
         num_sampling_steps: int = 200,
         recycling_steps: int = 3,
         sampling_mode: str = "truncated_bptt",
-        ddim_steps: int = 20,
         device: str = "cuda:0",
     ) -> None:
         super().__init__()
@@ -122,7 +131,6 @@ class Boltz2PairBias(nn.Module):
         self.num_sampling_steps = num_sampling_steps
         self.recycling_steps = recycling_steps
         self.sampling_mode = sampling_mode
-        self.ddim_steps = ddim_steps
         self._device = device
 
         logger.info(f"Loading Boltz-2 from {checkpoint_path} …")
@@ -482,7 +490,9 @@ class Boltz2PairBias(nn.Module):
         if self.diffusion_seed is not None:
             torch.set_rng_state(rng_state)
 
-        detach_boundary = num_sampling_steps - self.K  # keep grad only for last K steps
+        # keep grad only for the last K steps; K = None → grad through all steps
+        _K = num_sampling_steps if self.K is None else max(1, min(self.K, num_sampling_steps))
+        detach_boundary = num_sampling_steps - _K
 
         # Build network_condition_kwargs once
         network_condition_kwargs = dict(
@@ -598,7 +608,7 @@ class Boltz2PairBias(nn.Module):
         return {"sample_atom_coords": x_hat}
 
     # ------------------------------------------------------------------
-    # DDIM multi-step deterministic denoising
+    # DDIM deterministic denoising (with optional truncated backprop)
     # ------------------------------------------------------------------
 
     def _sample_ddim(
@@ -610,31 +620,39 @@ class Boltz2PairBias(nn.Module):
         num_sampling_steps: int,
     ) -> dict[str, Tensor]:
         """
-        N deterministic DDIM steps with fixed initial noise.
-
-        Uses ``self.ddim_steps`` steps subsampled evenly from the full
-        ``num_sampling_steps`` schedule.  Each step is a deterministic Euler
+        ``num_sampling_steps`` (= config ``diffusion_steps``) deterministic DDIM
+        steps with fixed initial noise.  Each step is a deterministic Euler
         update (gamma=0, no stochastic noise injection):
 
             x_{t-1} = x_t + step_scale · (σ_{t-1} − σ_t) · (x_t − x̂₀) / σ_t
 
-        Gradient flows through ALL steps AND through PairFormer (via the
-        diffusion conditioning that depends on z_biased at each step).
+        Gradient is retained through the **last K steps** (K = ``self.K`` =
+        config ``backprop_last_k``); earlier steps run under ``torch.no_grad()``
+        with the carried coordinates detached:
 
-        Because the trajectory is fully deterministic (fixed initial noise +
-        no stochastic Euler noise), the gradient is clean and reproducible.
-        This gives better structural precision than single-step (more denoising
-        iterations → sharper prediction) while avoiding the noise that kills
-        the stochastic TBPTT gradient.
+            steps 0 … (N-K-1)   no_grad (detached)
+            steps (N-K) … (N-1) autograd graph kept (per-step checkpointing)
+
+        ``K = None`` (or K ≥ N) keeps the gradient through **all** steps — the
+        full-gradient DDIM that was previously a separate ``ddim`` mode.  A
+        smaller K is the truncated-backprop variant (O(K) backward memory): the
+        forward trajectory is byte-for-byte the same, only the autograd graph is
+        shorter.  The trajectory is fully deterministic (fixed initial noise, no
+        stochastic Euler noise), so the gradient is clean and reproducible.
+
+        Keep ``diffusion_steps`` modest (≈20–50) when K = all (every step retains
+        the graph); use a long trajectory + small K for the truncated benchmark.
         """
         diff_module = self._boltz.structure_module
         atom_mask   = feats["atom_pad_mask"].float()
 
-        # Subsample schedule to ddim_steps intervals
-        sigmas_full = diff_module.sample_schedule(num_sampling_steps)
-        n = min(self.ddim_steps, num_sampling_steps)
-        indices = torch.linspace(0, num_sampling_steps, n + 1).long()
-        sigmas  = sigmas_full[indices]   # shape [n+1]
+        # Full deterministic schedule (no subsampling): run every step.
+        sigmas  = diff_module.sample_schedule(num_sampling_steps)   # [N+1]
+        n_steps = len(sigmas) - 1
+
+        # K = None → grad through all steps; else through the last K.
+        K = n_steps if self.K is None else max(1, min(self.K, n_steps))
+        detach_boundary = n_steps - K
 
         # Fixed initial noise (same every optimisation step)
         if self.diffusion_seed is not None:
@@ -654,30 +672,34 @@ class Boltz2PairBias(nn.Module):
         )
         step_scale = diff_module.step_scale
 
-        for i in range(n):
+        for i in range(n_steps):
             sigma_tm = sigmas[i].item()       # current noise level
             sigma_t  = sigmas[i + 1].item()   # next (lower) noise level
+            t_hat    = sigma_tm               # gamma=0 → no stochastic inflation
 
-            # gamma=0: no stochastic inflation → t_hat = sigma_tm exactly
-            t_hat = sigma_tm
-
-            # Per-step activation checkpointing: only atom_coords I/O is stored;
-            # the diffusion network internals are recomputed during backward.
-            # This keeps memory ~O(1) per step (instead of holding all N step
-            # graphs at once), which matters for larger proteins.  The recompute
-            # is cheap since the diffusion net is small next to the PairFormer trunk.
-            def _denoise_step(_coords, _t_hat=t_hat, _kw=network_condition_kwargs):
-                return diff_module.preconditioned_network_forward(
-                    _coords, _t_hat, network_condition_kwargs=_kw,
+            use_grad = i >= detach_boundary
+            if use_grad:
+                # Per-step activation checkpointing: only atom_coords I/O is
+                # stored; the diffusion network internals are recomputed during
+                # backward, keeping memory ~O(1) per grad step.
+                def _denoise_step(_coords, _t_hat=t_hat, _kw=network_condition_kwargs):
+                    return diff_module.preconditioned_network_forward(
+                        _coords, _t_hat, network_condition_kwargs=_kw,
+                    )
+                atom_coords_denoised = checkpoint.checkpoint(
+                    _denoise_step, atom_coords, use_reentrant=False,
                 )
+            else:
+                with torch.no_grad():
+                    atom_coords_denoised = diff_module.preconditioned_network_forward(
+                        atom_coords, t_hat,
+                        network_condition_kwargs=network_condition_kwargs,
+                    )
 
-            atom_coords_denoised = checkpoint.checkpoint(
-                _denoise_step, atom_coords, use_reentrant=False,
-            )
-
-            # Deterministic Euler step — no noise injection, gradient through all steps
+            # Deterministic Euler step — no noise injection.
             denoised_over_sigma = (atom_coords - atom_coords_denoised) / t_hat
-            atom_coords = atom_coords + step_scale * (sigma_t - t_hat) * denoised_over_sigma
+            atom_coords_next = atom_coords + step_scale * (sigma_t - t_hat) * denoised_over_sigma
+            atom_coords = atom_coords_next if use_grad else atom_coords_next.detach()
 
         diff_module.coordinate_augmentation_inference = orig_aug
         return {"sample_atom_coords": atom_coords}

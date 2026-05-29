@@ -125,21 +125,32 @@ class AlphaFoldConfig(BaseModel):
 
 
 class Boltz2Config(BaseModel):
+    # --- always used ---
     boltz2_checkpoint_path: str | None = None
-    truncated_backprop_steps: int = 5
-    boltz2_recycling_steps: int = 3
-    boltz2_num_sampling_steps: int = 200
     feats_path: str | None = None
-    # Sampling mode: "truncated_bptt" | "single_step" | "ddim"
-    # single_step: one deterministic denoising call at σ_max (ConForNets approach)
-    # ddim: N deterministic DDIM steps; cleaner gradient than truncated_bptt
+    boltz2_recycling_steps: int = 3
+
+    # --- sampler selection ---
+    # Which diffusion sampler to run; this is what decides how gradients reach
+    # w_pair/b_pair.  Reads the two knobs below:
+    #   single_step    : one deterministic denoise at σ_max (ConForNets) — reads
+    #                    NEITHER knob
+    #   ddim           : `diffusion_steps` deterministic steps; gradient through
+    #                    the last `backprop_last_k` steps (null ⇒ ALL steps =
+    #                    full-gradient DDIM).  A long trajectory + small K is the
+    #                    truncated-backprop variant (same forward, shorter graph).
+    #   truncated_bptt : `diffusion_steps` STOCHASTIC steps; gradient through the
+    #                    last `backprop_last_k` (null ⇒ all)
     sampling_mode: str = "truncated_bptt"
-    ddim_steps: int = 20  # number of steps for "ddim" mode
-    # Phase 2 only: reuse the diffusion seed phase 1 ended on (read from the
-    # phase-1 output dir) instead of re-scanning seeds.  The learned bias is
-    # co-adapted to its trajectory, so reusing the seed keeps phase 2 a true
-    # continuation; re-scanning at identity would drop the bias onto a mismatched
-    # seed.  Has no effect on phase 1.
+
+    # --- diffusion knobs (only the ones relevant to sampling_mode are read) ---
+    diffusion_steps: int = 200          # #denoising steps (all trajectory modes); keep ~20-50 for full-grad ddim
+    backprop_last_k: int | None = None  # ddim & truncated_bptt: grad through last K steps; null = all steps
+
+    # --- phase 2 only ---
+    # Reuse the diffusion seed phase 1 ended on (read from the phase-1 output dir)
+    # instead of re-scanning seeds, so the warm-started bias stays matched to its
+    # trajectory.  No effect on phase 1.
     reuse_phase1_seed: bool = True
 
 
@@ -232,14 +243,13 @@ class RocketRefinmentConfig(BaseModel):
         "w_plddt": "data.w_plddt",
         "downsample_ratio": "data.downsample_ratio",
         # Boltz-2
-        "boltz2_checkpoint_path":    "boltz2.boltz2_checkpoint_path",
-        "truncated_backprop_steps":  "boltz2.truncated_backprop_steps",
-        "boltz2_recycling_steps":    "boltz2.boltz2_recycling_steps",
-        "boltz2_num_sampling_steps": "boltz2.boltz2_num_sampling_steps",
-        "feats_path":                "boltz2.feats_path",
-        "sampling_mode":             "boltz2.sampling_mode",
-        "ddim_steps":                "boltz2.ddim_steps",
-        "reuse_phase1_seed":         "boltz2.reuse_phase1_seed",
+        "boltz2_checkpoint_path": "boltz2.boltz2_checkpoint_path",
+        "boltz2_recycling_steps": "boltz2.boltz2_recycling_steps",
+        "feats_path":             "boltz2.feats_path",
+        "sampling_mode":          "boltz2.sampling_mode",
+        "diffusion_steps":        "boltz2.diffusion_steps",
+        "backprop_last_k":        "boltz2.backprop_last_k",
+        "reuse_phase1_seed":      "boltz2.reuse_phase1_seed",
         # Metadata
         "note": "note",
     }

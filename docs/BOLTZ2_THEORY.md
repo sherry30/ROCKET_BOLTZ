@@ -239,7 +239,8 @@ injection → `w_pair` and `b_pair`.
 
 ### Step 3 — Truncated-backprop diffusion sampling
 
-T = total sampling steps (default 200), K = truncated_backprop_steps (default 20).
+T = total sampling steps (config `diffusion_steps`, default 200), K = grad-retained
+trailing steps (config `backprop_last_k`, default 20).
 
 ```
 x_T ~ N(0, σ_T²)     initial noisy coordinates     [1, N_atoms, 3]

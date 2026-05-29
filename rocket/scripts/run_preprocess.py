@@ -605,12 +605,20 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
         alphafold=AlphaFoldConfig(use_deepspeed_evo_attention=False),
         boltz2=Boltz2Config(
             boltz2_checkpoint_path=checkpoint,
-            truncated_backprop_steps=20,
             boltz2_recycling_steps=3,
-            boltz2_num_sampling_steps=200,
             feats_path=feats_path,
             sampling_mode=getattr(args, "sampling_mode", "ddim"),
-            ddim_steps=getattr(args, "ddim_steps", 20),
+            # Default ddim grads through every step, so keep it short (50);
+            # truncated_bptt runs the full 200 and grads only the last K.
+            diffusion_steps=(
+                getattr(args, "diffusion_steps", None)
+                or (50 if getattr(args, "sampling_mode", "ddim") == "ddim" else 200)
+            ),
+            # null ⇒ full gradient (default for ddim); truncated_bptt → last 20.
+            backprop_last_k=(
+                getattr(args, "backprop_last_k", None)
+                or (20 if getattr(args, "sampling_mode", "ddim") == "truncated_bptt" else None)
+            ),
         ),
     )
     if seg_id:
@@ -671,14 +679,23 @@ def parse_args():
     parser.add_argument("--map2", default=None)
     parser.add_argument("--full_composition", default=None)
     parser.add_argument(
-        "--sampling_mode", choices=["truncated_bptt", "single_step", "ddim"],
+        "--sampling_mode",
+        choices=["truncated_bptt", "single_step", "ddim"],
         default="ddim",
-        help="Boltz-2 gradient mode: truncated_bptt (original TBPTT), "
-             "single_step (ConForNets one-step), or ddim (deterministic N-step). Default: ddim.",
+        help="Boltz-2 gradient mode: truncated_bptt (original stochastic TBPTT), "
+             "single_step (ConForNets one-step), or ddim (deterministic). Default: ddim.",
     )
     parser.add_argument(
-        "--ddim_steps", type=int, default=20,
-        help="Number of deterministic DDIM steps when --sampling_mode=ddim (default 20).",
+        "--diffusion_steps", type=int, default=None,
+        help="Number of diffusion steps for trajectory modes (default: 50 for "
+             "ddim, 200 for truncated_bptt).",
+    )
+    parser.add_argument(
+        "--backprop_last_k", type=int, default=None,
+        help="Keep the gradient through only the last K diffusion steps (ddim & "
+             "truncated_bptt).  Default: None (full gradient) for ddim, 20 for "
+             "truncated_bptt.  Use e.g. --sampling_mode ddim --diffusion_steps 200 "
+             "--backprop_last_k 20 for the deterministic truncated-backprop benchmark.",
     )
 
     args = parser.parse_args()
