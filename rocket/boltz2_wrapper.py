@@ -1,14 +1,14 @@
 """
-Boltz-2 inference wrapper with pair-representation bias for ROCKET.
+Boltz-2 inference wrapper with a learnable pair-representation bias for ROCKET.
 
-Implements the ROCKET-Boltz2 (naive pair-embedding-bias) baseline described in
-BOLTZ2_INTEGRATION.md.  The learnable bias is applied to the trunk's final pair
-representation z AFTER the last PairFormer recycling step and BEFORE z is consumed
-by the diffusion conditioning module.
+The learnable bias is a channel-wise affine transform applied to the trunk pair
+representation z just before the PairFormer stack on the final recycling pass
+(see docs/BOLTZ2_IMPLEMENTATION.md).  The only trainable parameters are w_pair
+and b_pair; all Boltz-2 weights are frozen.
 
-This is deliberately NOT guided diffusion – no gradient is injected into the
-denoising update itself.  The learnable parameters are only w_pair and b_pair
-(multiplicative + additive bias on z).
+This is not guided diffusion: no gradient is injected into the denoising update
+itself.  Gradients reach w_pair/b_pair through the sampling step (see the
+``sampling_mode`` options on Boltz2PairBias).
 """
 
 from __future__ import annotations
@@ -62,23 +62,22 @@ class Boltz2PairBias(nn.Module):
 
     Three sampling modes control how gradients flow back to w_pair/b_pair:
 
-    ``"truncated_bptt"`` (original)
+    ``"truncated_bptt"``
         Full 200-step stochastic reverse diffusion; gradients retained only
-        through the last ``truncated_backprop_steps`` (K) steps.  In practice
-        the stochastic noise washes out the signal from the pair bias.
+        through the last ``truncated_backprop_steps`` (K) steps.  The stochastic
+        per-step noise tends to wash out the pair-bias signal.
 
     ``"single_step"``
-        Single deterministic denoising step at σ_max:
-        x̂₀ = D_θ(σ_max·ε, σ_max, z_biased).
-        One network call; clean gradient through PairFormer + one diffusion step.
-        Inspired by ConForNets (arxiv 2604.18559).  7× more structurally
-        sensitive than TBPTT; 2.3× lower seed variance.
+        Single deterministic denoising step at sigma_max
+        (x0_hat = D(sigma_max * eps, sigma_max, z_biased)).  One network call,
+        giving a clean gradient through the PairFormer and one diffusion step.
+        Inspired by ConForNets (arXiv:2604.18559).
 
-    ``"ddim"``
-        N deterministic DDIM steps with fixed initial noise; gradient flows
-        through all N steps AND the PairFormer.  Better structural precision
-        than single-step (N × denoising iterations) while keeping the gradient
-        fully deterministic.  N controlled by ``ddim_steps`` (default 20).
+    ``"ddim"`` (recommended)
+        N deterministic DDIM steps with fixed initial noise; the gradient flows
+        through all N steps and the PairFormer.  Sharper structural prediction
+        than single-step while keeping the gradient fully deterministic.
+        N is set by ``ddim_steps`` (default 20).
 
     Parameters
     ----------
@@ -414,22 +413,21 @@ class Boltz2PairBias(nn.Module):
 
                 z = z + model.msa_module(z, s_inputs, feats, use_kernels=False)
 
-                # --- CONFORNETS CRITICAL INJECTION POINT ---
+                # Pair-bias injection (final recycling pass only).
                 if is_last:
-                    # 1. Apply the channel-wise transform right before the Pairformer blocks
-                    # z shape: [B, N, N, 128] @ w_pair shape: [128, 128] -> [B, N, N, 128]
+                    # Channel-wise transform right before the PairFormer blocks:
+                    # z [B, N, N, 128] @ w_pair [128, 128] + b_pair -> [B, N, N, 128]
                     z = torch.matmul(z, w_pair) + b_pair
 
-                    # 2. Replicate chunk size logic from PairformerModule code
+                    # Chunk size mirrors Boltz-2's PairformerModule.
                     chunk_size_tri_attn = 128 if z.shape[1] > 512 else 512
 
-                    # 3. Step-by-block fine-grained activation checkpointing
-                    # This completely bypasses the 'if self.training' block check in Boltz-2 source code
+                    # Per-block activation checkpointing so gradients flow through
+                    # the whole PairFormer without storing every block's activations.
                     for layer in model.pairformer_module.layers:
-                        # Default-argument captures `layer` by value, avoiding Python's
-                        # late-binding closure semantics.  Without this, during backward
-                        # recompute all run_block closures would reference the last layer,
-                        # producing completely wrong gradients.
+                        # Capture `layer` by default argument to avoid Python's
+                        # late-binding closure bug: without it, the backward
+                        # recompute would reference the last layer for every block.
                         def run_block(s_tensor, z_tensor, _layer=layer):
                             return _layer(
                                 s_tensor,
@@ -664,10 +662,10 @@ class Boltz2PairBias(nn.Module):
             t_hat = sigma_tm
 
             # Per-step activation checkpointing: only atom_coords I/O is stored;
-            # the DiffusionTransformer internals are recomputed during backward.
-            # Recompute costs ~0.4s/iter for 20 steps (the diffusion net is small
-            # relative to the PairFormer trunk) while saving ~22 GB VRAM for 1lj5
-            # and keeping memory ~O(1) per step — essential for larger proteins.
+            # the diffusion network internals are recomputed during backward.
+            # This keeps memory ~O(1) per step (instead of holding all N step
+            # graphs at once), which matters for larger proteins.  The recompute
+            # is cheap since the diffusion net is small next to the PairFormer trunk.
             def _denoise_step(_coords, _t_hat=t_hat, _kw=network_condition_kwargs):
                 return diff_module.preconditioned_network_forward(
                     _coords, _t_hat, network_condition_kwargs=_kw,

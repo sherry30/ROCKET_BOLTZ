@@ -1,14 +1,13 @@
 """
-ROCKET-Boltz2: Inference-time X-ray crystallographic refinement using Boltz-2.
+ROCKET-Boltz2: inference-time X-ray crystallographic refinement using Boltz-2.
 
-Implements the naive pair-embedding-bias baseline described in
-BOLTZ2_INTEGRATION.md.  Learnable parameters: w_pair and b_pair acting on
-Boltz-2's trunk pair representation z.  No guided diffusion.
+Optimises a channel-wise bias (w_pair, b_pair) on Boltz-2's trunk pair
+representation to maximise the crystallographic log-likelihood gain (LLG).
+See docs/BOLTZ2_IMPLEMENTATION.md for the full method.
 
 Usage
 -----
-Prepare Boltz-2 feats (batched, device=cpu) beforehand via
-``prepare_boltz2_feats`` (see helper below), then call::
+Prepare Boltz-2 feats beforehand via ``prepare_boltz2_feats``, then call::
 
     config = RocketRefinmentConfig.from_yaml_file("ROCKET_config_phase1.yaml")
     feats  = prepare_boltz2_feats(pdb_path, cache_dir=cache_dir)

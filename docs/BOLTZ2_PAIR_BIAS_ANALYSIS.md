@@ -481,7 +481,7 @@ to improve real R-factors.  The remaining work is tuning and validation:
    `grad_clip_norm` ≤ 0.5.
 
 3. **Always validate on real R-factors**, not ROCKET's internal Rwork (which is
-   flat/uninformative).  Benchmark pipeline (`benchmark_rocket.sh`):
+   flat/uninformative).  Benchmark pipeline (`tools/benchmark_rocket.sh`):
    raw `model_vs_data` (native frame) → **superpose onto pdb_redo** →
    `phenix.refine` → refined `model_vs_data` → map-model CC → refined-vs-truth RMSD.
    Measure both raw and post-refine R-factors, since refinement can mask

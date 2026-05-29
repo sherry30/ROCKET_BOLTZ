@@ -572,10 +572,9 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
             iterations=100,
             init_recycling=3,
             optimization=OptimizationParams(
-                # lr=1e-3 overshoots even on the first Adam step (T2 debug result:
-                # single step at lr=1e-3 yields Δ=-5 LLG even on full reflections).
-                # lr=1e-4 is stable; smooth_stage_epochs=80 starts decay at iter 20,
-                # decaying from 1e-4 → 1e-5 to prevent post-peak drift.
+                # The channel-wise pair bias is sensitive: lr=1e-3 overshoots,
+                # lr=1e-4 is stable. The smooth stage decays the LR over the last
+                # 80 of 100 iterations (1e-4 -> 1e-5) to avoid drifting past the optimum.
                 additive_learning_rate=1e-4,
                 multiplicative_learning_rate=1e-4,
                 l2_weight=1e-7,
