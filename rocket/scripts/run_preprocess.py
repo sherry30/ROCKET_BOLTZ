@@ -443,8 +443,16 @@ def _write_boltz_yaml(
 def _find_a3m_from_alignment_dir(alignment_dir: str, file_id: str) -> str | None:
     """Return the best available a3m file from a precomputed alignment directory.
 
-    Looks inside ``{alignment_dir}/{file_id}/`` for a3m files, preferring
-    bfd_uniclust_hits.a3m > uniref90_hits.a3m > mgnify_hits.a3m > any *.a3m.
+    Looks inside ``{alignment_dir}/{file_id}/`` for a3m files, preferring (in order):
+      {file_id}.a3m            (merged UniRef+env MSA from rk.generate_msa)
+      bfd_uniclust_hits.a3m    (AF2/OpenFold precomputed alignments)
+      uniref90_hits.a3m
+      mgnify_hits.a3m
+      any *.a3m                (deterministic: first when sorted)
+
+    {file_id}.a3m is preferred because it is the COMBINED MSA; the raw
+    per-database files (uniref.a3m, bfd.mgnify30.metaeuk30.smag30.a3m) left by
+    rk.generate_msa are partial and must not be picked over the merged file.
     Returns None if the directory or no a3m files are found.
     """
     if alignment_dir is None:
@@ -452,12 +460,17 @@ def _find_a3m_from_alignment_dir(alignment_dir: str, file_id: str) -> str | None
     search_dir = os.path.join(os.path.abspath(alignment_dir), file_id)
     if not os.path.isdir(search_dir):
         return None
-    for name in ("bfd_uniclust_hits.a3m", "uniref90_hits.a3m", "mgnify_hits.a3m"):
+    for name in (
+        f"{file_id}.a3m",
+        "bfd_uniclust_hits.a3m",
+        "uniref90_hits.a3m",
+        "mgnify_hits.a3m",
+    ):
         candidate = os.path.join(search_dir, name)
         if os.path.exists(candidate):
             logger.info(f"Found MSA for Boltz-2: {candidate}")
             return candidate
-    hits = glob.glob(os.path.join(search_dir, "*.a3m"))
+    hits = sorted(glob.glob(os.path.join(search_dir, "*.a3m")))
     if hits:
         logger.info(f"Found MSA for Boltz-2: {hits[0]}")
         return hits[0]

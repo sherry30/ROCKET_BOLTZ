@@ -101,7 +101,7 @@ resolution bins, on **detached** coordinates, so it does not enter the gradient.
 `rk.preprocess --model boltz2` produces two files in `ROCKET_inputs/`:
 
 ```
-rk.preprocess --model boltz2 [--a3m_path alignment.a3m]
+rk.preprocess --model boltz2 [--precomputed_alignment_dir alignments/]
   │
   ├─ boltz predict → {file_id}_boltz2_unrelaxed.pdb
   │     (Boltz-2 structure prediction from FASTA)
@@ -137,7 +137,7 @@ prepare_boltz2_feats(pred-aligned.pdb, a3m_path=alignment.a3m)
   ├─ parse_boltz_schema(..., boltz_2=True)
   │     → Target: StructureV2 (Boltz-2 atom graph)
   │
-  ├─ parse_a3m(a3m_path) → MSA object  [if --a3m_path provided]
+  ├─ parse_a3m(a3m) → MSA object  [if an MSA was found in the alignment dir]
   │     mapped to {chain_asym_id → MSA} for all protein chains
   │     enables: z = z + msa_module(z, s, feats)  in the trunk
   │     without this: single-sequence fallback (dummy MSA)
@@ -157,9 +157,10 @@ prepare_boltz2_feats(pred-aligned.pdb, a3m_path=alignment.a3m)
 ```
 
 `feats` is moved to GPU once at the start of `run_boltz2_xray_refinement` and
-reused for every iteration.  Providing `--a3m_path` is strongly recommended:
-it activates the MSA module in the trunk and gives the model richer inter-residue
-information, which translates to a better gradient signal.
+reused for every iteration.  Providing an MSA via `--precomputed_alignment_dir`
+is strongly recommended: it activates the MSA module in the trunk and gives the
+model richer inter-residue information, which translates to a better gradient
+signal.
 
 ---
 

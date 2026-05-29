@@ -87,7 +87,7 @@ rk.generate_msa \
   --fasta 1lj5_fasta/1lj5.fasta \
   --file_id 1lj5 \
   --output_dir alignments/
-# outputs: alignments/1lj5/bfd_uniclust_hits.a3m   ← use for --a3m_path
+# outputs: alignments/1lj5/1lj5.a3m   ← merged MSA, auto-detected by --precomputed_alignment_dir
 ```
 
 **Step 1 — Preprocess (GPU node)**
@@ -99,13 +99,17 @@ rk.preprocess \
   --output_dir ./1lj5_processed \
   --model boltz2 \
   --boltz2_cache_dir /data/dust/group/it/crystalsfirst/dev/shehry/boltz_cache \
-  --a3m_path alignments/1lj5/bfd_uniclust_hits.a3m \
+  --precomputed_alignment_dir alignments/ \
   --sampling_mode ddim
 ```
 
-`--a3m_path` activates the Boltz-2 MSA module (`z = z + msa_module(...)`) —
-recommended for better gradient signal.  `--sampling_mode` selects the diffusion
-gradient mode (`ddim` recommended; see below).
+`--precomputed_alignment_dir` (default `alignments/`) activates the Boltz-2 MSA
+module.  rk.preprocess looks in `<alignment_dir>/<file_id>/` and auto-detects the
+a3m, preferring the merged `<file_id>.a3m` written by `rk.generate_msa` (then the
+AF2/OpenFold names `bfd_uniclust_hits.a3m` etc.).  The selected MSA is featurized
+into `feats_boltz2.pkl` at preprocess time, so `rk.refine` picks it up
+automatically.  `--sampling_mode` selects the diffusion gradient mode
+(`ddim` recommended; see below).
 
 What this does internally:
 1. Parses FASTA → writes `{file_id}_boltz_input.yaml`

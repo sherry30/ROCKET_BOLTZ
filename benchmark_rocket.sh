@@ -127,7 +127,23 @@ phenix.model_vs_data input.pdb "$EXP_MTZ" \
 grab 1_raw_mvd.log | tee -a "$SUMMARY"
 
 if [ "$SKIP_REFINE" -eq 1 ]; then
-    log ""; log "[2-6] skipped (--skip-refine)"; log "DONE. Logs in $(pwd)"; exit 0
+    # Raw method output only: R-factors (above) + RMSD to the deposited model,
+    # NO refinement, no map CC.
+    # NOTE: this is the RAW prediction.  CrystalBoltz reports POST-refinement
+    # numbers (it optimises coords+B against the deposited Fobs), so for an
+    # apples-to-apples comparison run WITHOUT --skip-refine and compare the
+    # REFINED R-factors.  Use --skip-refine only to inspect the raw output.
+    log ""
+    if [ -n "$REF_PDB" ]; then
+        log "[RMSD] model vs reference (no refinement)"
+        phenix.superpose_pdbs "$REF_PDB" input.pdb \
+            file_name=superposed_norefine.pdb > skip_superpose.log 2>&1 || true
+        grep -iE "rmsd|r.m.s" skip_superpose.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
+    else
+        log "[RMSD] skipped (no --ref-pdb)"
+    fi
+    log ""; log "[refine/map-CC] skipped (--skip-refine)"
+    log "DONE. Logs in $(pwd)"; exit 0
 fi
 
 # ---- 2. superpose RAW model onto ground truth (BEFORE refine) -------------

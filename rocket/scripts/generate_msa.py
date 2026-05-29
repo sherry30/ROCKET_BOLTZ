@@ -1,22 +1,27 @@
 """
-rk.generate_msa — Generate MSA a3m files for a protein FASTA using the
+rk.generate_msa — Generate an MSA a3m file for a protein FASTA using the
 ColabFold MMseqs2 REST API (no local database required).
 
-Queries the public ColabFold server (api.colabfold.com), which runs a fast
-MMseqs2 search against UniRef100 + environmental sequences — the same
-databases used by AlphaFold2 and OpenFold, just accessed via HTTP instead
-of local jackhmmer/hhblits.
+This wraps Boltz-2's own MMseqs2 client (``boltz.data.msa.mmseqs2.run_mmseqs2``)
+so the MSA is produced exactly as the Boltz-2 pipeline expects.  It queries the
+public ColabFold server (api.colabfold.com), running a fast MMseqs2 search over
+UniRef + environmental databases (BFD/MGnify/etc).
 
-Output layout (matches the rk.preprocess / OpenFold alignment convention):
+Output:
 
-    <output_dir>/<file_id>/bfd_uniclust_hits.a3m   — UniRef100 + BFD hits
-    <output_dir>/<file_id>/mgnify_hits.a3m          — environmental hits
+    <output_dir>/<file_id>/<file_id>.a3m   — combined UniRef + environmental MSA;
+                                             auto-detected by rk.preprocess via
+                                             --precomputed_alignment_dir <output_dir>
+    <output_dir>/<file_id>/_raw/           — raw per-database a3m (reference only)
 
-A merged file is also written:
+Only the single combined <file_id>.a3m sits at the top level.  This is correct
+for BOTH backends: Boltz-2's resolver picks <file_id>.a3m, and the AlphaFold2/
+OpenFold pipeline (which concatenates every top-level .a3m in the dir) reads
+exactly one MSA — no duplicated sequences.  The raw per-database files are kept
+under _raw/ so they don't get double-counted.
 
-    <output_dir>/<file_id>/<file_id>.a3m            — union of the above
-                                                       (used by rk.preprocess
-                                                       --model boltz2)
+Note: ColabFold MMseqs2 does not produce template hits (pdb70_hits.hhr), so an
+AF2-ROCKET run from this directory runs without templates.
 
 Usage
 -----
@@ -25,15 +30,23 @@ Usage
         --file_id 1lj5 \\
         --output_dir alignments/
 
-For multi-chain proteins the sequences are submitted jointly (paired MSA);
-each chain's individual alignment is also saved under a separate sub-dir if
---split_chains is passed.
+Chain handling
+--------------
+This script is correct for proteins with a SINGLE distinct sequence — i.e.
+monomers and homo-oligomers (multiple identical chains).  In that case the one
+merged a3m is the right MSA for every (identical) protein chain, and
+``rk.preprocess --model boltz2`` assigns it accordingly.
+
+It does NOT yet handle HETERO-multimers (two or more *different* protein
+sequences) correctly: the per-chain alignments are concatenated into a single
+file and that same file is assigned to all chains, which corrupts the per-chain
+MSA.  Proper per-chain a3m output + paired-MSA support is not implemented yet.
+For now use this only on single-sequence targets.
 
 Notes
 -----
 - Internet access is required to reach api.colabfold.com.
-- Typical turnaround: 1–5 min for a ~400-residue protein, up to 20 min for
-  long/multi-chain submissions.
+- Typical turnaround: 1–5 min for a ~400-residue protein.
 - Rate-limit: the public server allows a few concurrent jobs per IP.  For
   large-scale use, host a local ColabFold server with --host_url.
 """
@@ -41,19 +54,13 @@ Notes
 from __future__ import annotations
 
 import argparse
-import io
-import os
+import shutil
 import sys
-import tarfile
-import time
 from pathlib import Path
 
-import requests
 from loguru import logger
 
 _API_URL = "https://api.colabfold.com"
-_POLL_INTERVAL = 10   # seconds between status polls
-_MAX_WAIT = 3600      # give up after 1 hour
 
 
 # ---------------------------------------------------------------------------
@@ -79,109 +86,6 @@ def _read_fasta(path: Path) -> list[tuple[str, str]]:
     return records
 
 
-def _build_query(records: list[tuple[str, str]], start_n: int = 101) -> str:
-    """Build a multi-sequence FASTA string for the ColabFold API."""
-    lines = []
-    for i, (_, seq) in enumerate(records):
-        lines.append(f">{start_n + i}")
-        lines.append(seq)
-    return "\n".join(lines) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# ColabFold API
-# ---------------------------------------------------------------------------
-
-def _submit(query: str, mode: str = "env", host: str = _API_URL) -> str:
-    """Submit an MSA job; return ticket ID."""
-    resp = requests.post(
-        f"{host}/ticket/msa",
-        json={"q": query, "mode": mode},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if "id" not in data:
-        raise RuntimeError(f"Unexpected API response: {data}")
-    ticket_id = data["id"]
-    logger.info(f"Submitted MSA job — ticket: {ticket_id}")
-    return ticket_id
-
-
-def _wait_for_completion(ticket_id: str, host: str = _API_URL) -> None:
-    """Poll until the job is COMPLETE or ERROR."""
-    deadline = time.time() + _MAX_WAIT
-    while time.time() < deadline:
-        resp = requests.get(f"{host}/ticket/{ticket_id}", timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        status = data.get("status", "UNKNOWN")
-
-        if status == "COMPLETE":
-            logger.info(f"Job {ticket_id}: COMPLETE")
-            return
-        elif status == "ERROR":
-            raise RuntimeError(f"MSA job failed: {data.get('msg', '(no message)')}")
-        else:
-            logger.info(f"Job {ticket_id}: {status} — waiting {_POLL_INTERVAL}s …")
-            time.sleep(_POLL_INTERVAL)
-
-    raise TimeoutError(f"MSA job {ticket_id} did not complete within {_MAX_WAIT}s.")
-
-
-def _download(ticket_id: str, host: str = _API_URL) -> bytes:
-    """Download the result tar.gz and return its bytes."""
-    resp = requests.get(
-        f"{host}/result/download/{ticket_id}",
-        timeout=120,
-        stream=True,
-    )
-    resp.raise_for_status()
-    data = b"".join(resp.iter_content(chunk_size=65536))
-    logger.info(f"Downloaded {len(data) / 1024:.0f} KB for ticket {ticket_id}")
-    return data
-
-
-def _extract_a3m_files(tar_bytes: bytes) -> dict[str, str]:
-    """
-    Extract .a3m files from tar.gz bytes.
-    Returns {filename_stem: a3m_content} dict.
-    """
-    result: dict[str, str] = {}
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tf:
-        for member in tf.getmembers():
-            if member.name.endswith(".a3m"):
-                stem = Path(member.name).stem   # e.g. "101" or "101_env"
-                content = tf.extractfile(member).read().decode("utf-8")
-                result[stem] = content
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Merge helpers
-# ---------------------------------------------------------------------------
-
-def _merge_a3m_files(contents: list[str]) -> str:
-    """
-    Concatenate multiple a3m files.  The query sequence (first record) from
-    each file is identical; keep it only from the first file.
-    """
-    merged_lines: list[str] = []
-    for i, content in enumerate(contents):
-        lines = content.splitlines(keepends=True)
-        if i == 0:
-            merged_lines.extend(lines)
-        else:
-            # Skip the first two lines (query header + query sequence)
-            skip = 0
-            for j, line in enumerate(lines):
-                if line.startswith(">"):
-                    skip = j + 2   # header + sequence
-                    break
-            merged_lines.extend(lines[skip:])
-    return "".join(merged_lines)
-
-
 # ---------------------------------------------------------------------------
 # Main workflow
 # ---------------------------------------------------------------------------
@@ -193,56 +97,71 @@ def generate_msa(
     host: str = _API_URL,
 ) -> Path:
     """
-    Generate MSA for the sequences in fasta_path and write alignment files.
+    Generate an MSA for the sequence(s) in fasta_path via Boltz-2's own
+    ColabFold MMseqs2 client and write the a3m used by rk.preprocess --model boltz2.
 
-    Returns the path to the primary merged a3m file.
+    Returns the path to the merged a3m file.
     """
+    # Boltz's maintained ColabFold client — correct API form-encoding, headers,
+    # tar member names (uniref.a3m / bfd.mgnify30.metaeuk30.smag30.a3m), and the
+    # exact combined-MSA format the Boltz-2 featurizer expects.
+    from boltz.data.msa.mmseqs2 import run_mmseqs2  # noqa: PLC0415
+
     records = _read_fasta(fasta_path)
     if not records:
         raise ValueError(f"No sequences found in {fasta_path}")
 
-    logger.info(f"Submitting {len(records)} chain(s) from {fasta_path.name}")
-    query = _build_query(records, start_n=101)
+    seqs = [seq for _, seq in records]
+    distinct = list(dict.fromkeys(seqs))
+    if len(distinct) > 1:
+        logger.warning(
+            f"{len(distinct)} DISTINCT protein sequences detected — hetero-multimer "
+            "MSA is not handled correctly yet (each chain needs its own / paired MSA). "
+            "Writing the first sequence's MSA only; results for the other chains will "
+            "be wrong.  Use single-sequence targets for now."
+        )
 
-    ticket_id = _submit(query, mode="env", host=host)
-    _wait_for_completion(ticket_id, host=host)
-    tar_bytes = _download(ticket_id, host=host)
-    a3m_files = _extract_a3m_files(tar_bytes)
-
-    if not a3m_files:
-        raise RuntimeError("No .a3m files found in server response.")
-
-    # Sort by stem so that 101, 101_env, 102, 102_env… are in order
-    sorted_stems = sorted(a3m_files.keys())
-    logger.debug(f"Received files: {sorted_stems}")
-
-    # Separate main hits from environmental hits
-    main_stems = [s for s in sorted_stems if not s.endswith("_env")]
-    env_stems  = [s for s in sorted_stems if s.endswith("_env")]
-
-    main_content = _merge_a3m_files([a3m_files[s] for s in main_stems]) if main_stems else ""
-    env_content  = _merge_a3m_files([a3m_files[s] for s in env_stems])  if env_stems  else ""
-
-    # Write output files
     aln_dir = output_dir / file_id
     aln_dir.mkdir(parents=True, exist_ok=True)
+    work_prefix = str(aln_dir / "_mmseqs2")
 
-    bfd_path = aln_dir / "bfd_uniclust_hits.a3m"
-    bfd_path.write_text(main_content)
-    logger.info(f"Wrote {bfd_path}  ({main_content.count(chr(10))} lines)")
-
-    if env_content:
-        mgn_path = aln_dir / "mgnify_hits.a3m"
-        mgn_path.write_text(env_content)
-        logger.info(f"Wrote {mgn_path}  ({env_content.count(chr(10))} lines)")
-
-    # Merged file used by rk.preprocess --model boltz2
-    merged = _merge_a3m_files(
-        [c for c in [main_content, env_content] if c]
+    logger.info(
+        f"Submitting {len(seqs)} sequence(s) from {fasta_path.name} to {host} "
+        "(ColabFold MMseqs2; UniRef + environmental) …"
     )
+    a3m_lines = run_mmseqs2(
+        seqs[0] if len(seqs) == 1 else seqs,
+        prefix=work_prefix,
+        use_env=True,
+        use_filter=True,
+        use_pairing=False,
+        host_url=host,
+    )
+
+    # run_mmseqs2 returns one combined (UniRef + env) a3m string per input seq
+    merged = a3m_lines[0]
     merged_path = aln_dir / f"{file_id}.a3m"
     merged_path.write_text(merged)
-    logger.info(f"Wrote merged a3m → {merged_path}  ({merged.count(chr(10))} lines)")
+    logger.info(
+        f"Wrote merged a3m → {merged_path}  ({merged.count(chr(10))} lines, "
+        f"{merged.count('>')} sequences)"
+    )
+
+    # Keep the per-database a3m files for reference, but in a _raw/ SUBdir — NOT
+    # alongside <file_id>.a3m.  This matters for the AlphaFold2/OpenFold pipeline:
+    # OpenFold's DataPipeline does `for f in os.listdir(alignment_dir): if .a3m`,
+    # i.e. it concatenates EVERY top-level .a3m.  If the merged file and its raw
+    # parts both sat at top level, OpenFold would read the same sequences twice.
+    # A subdir is ignored by os.listdir's extension check and by the Boltz-2
+    # resolver's top-level glob, so both pipelines see exactly one MSA.
+    raw_dir = aln_dir / "_raw"
+    raw_dir.mkdir(exist_ok=True)
+    work_dir = Path(f"{work_prefix}_env")
+    for raw in ("uniref.a3m", "bfd.mgnify30.metaeuk30.smag30.a3m"):
+        src = work_dir / raw
+        if src.is_file():
+            shutil.copy(src, raw_dir / raw)
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     return merged_path
 
@@ -263,7 +182,8 @@ def cli_generate_msa() -> None:
     parser.add_argument(
         "--fasta",
         required=True,
-        help="Input FASTA file.  For multi-chain proteins include all chains.",
+        help="Input FASTA file.  Use single-sequence targets (monomer or "
+             "homo-oligomer); hetero-multimers are not handled correctly yet.",
     )
     parser.add_argument(
         "--file_id",
@@ -315,7 +235,9 @@ def cli_generate_msa() -> None:
     print(f"    --output_dir ./{args.file_id}_processed \\")
     print(f"    --model boltz2 \\")
     print(f"    --boltz2_cache_dir /path/to/boltz_cache \\")
-    print(f"    --a3m_path {merged_path}")
+    print(f"    --precomputed_alignment_dir {output_dir}")
+    print()
+    print(f"  (rk.preprocess auto-detects {output_dir}/{args.file_id}/{args.file_id}.a3m)")
     print("=" * 60)
 
 
