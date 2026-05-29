@@ -663,9 +663,18 @@ class Boltz2PairBias(nn.Module):
             # gamma=0: no stochastic inflation → t_hat = sigma_tm exactly
             t_hat = sigma_tm
 
-            atom_coords_denoised = diff_module.preconditioned_network_forward(
-                atom_coords, t_hat,
-                network_condition_kwargs=network_condition_kwargs,
+            # Per-step activation checkpointing: trade recomputation for memory.
+            # Without this, all n DiffusionTransformer forward passes are held in
+            # memory simultaneously (~1.2 GB/step for 1lj5; more for larger proteins).
+            # With checkpointing, only atom_coords I/O is stored; internals are
+            # recomputed during backward — memory usage drops to ~O(1) extra per step.
+            def _denoise_step(_coords, _t_hat=t_hat, _kw=network_condition_kwargs):
+                return diff_module.preconditioned_network_forward(
+                    _coords, _t_hat, network_condition_kwargs=_kw,
+                )
+
+            atom_coords_denoised = checkpoint.checkpoint(
+                _denoise_step, atom_coords, use_reentrant=False,
             )
 
             # Deterministic Euler step — no noise injection, gradient through all steps
