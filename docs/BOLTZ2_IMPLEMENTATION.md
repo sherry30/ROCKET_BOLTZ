@@ -260,8 +260,9 @@ pLDDT→pseudo-B conversion used in the original AF2-ROCKET.
 **Learning-rate note**: `lr=1e-3` overshoots even on the first Adam step
 (debug T2: single step at `lr=1e-3` gives ΔLLG=−5 even on full reflections).
 `lr=1e-4` is stable: no collapse, monotone improvement for ~20 iterations.
-`rk.preprocess` defaults to `lr=1e-4` with `smooth_stage_epochs=80`
-(decay starts at iter 20, lr decays from 1e-4 → 1e-5).
+`rk.preprocess` defaults to `iterations=300`, `lr=1e-4` with
+`smooth_stage_epochs=280` (annealing starts ~iter 20, lr decays 1e-4 → 1e-5 over
+the rest of the run).
 
 **Smooth stage formula fix**: the LR decay formula used `decay_rate^iteration`
 (global index) instead of `decay_rate^stage_step` (steps into the smooth stage).
@@ -272,14 +273,14 @@ Phase-2 config differences vs Phase-1:
 
 | Field | Phase 1 | Phase 2 |
 |---|---|---|
-| `algorithm.iterations` | 100 | 500 |
+| `algorithm.iterations` | 300 | 300 |
 | `algorithm.optimization.additive_learning_rate` | **0.0001** | **0.00001** |
 | `algorithm.optimization.multiplicative_learning_rate` | **0.0001** | **0.00001** |
 | `algorithm.optimization.l2_weight` | 1e-7 | 0.0 |
-| `algorithm.optimization.smooth_stage_epochs` | 80 | null |
+| `algorithm.optimization.smooth_stage_epochs` | 280 | null |
 | `algorithm.optimization.batch_sub_ratio` | 1.0 | 1.0 |
 | `data.min_resolution` | 3.0 Å | null (all) |
-| `execution.num_of_runs` | 3 | 1 |
+| `execution.num_of_runs` | 1 | 1 |
 | `paths.starting_bias` | — | `best_w_pair_*.pt` |
 | `paths.starting_weights` | — | `best_b_pair_*.pt` |
 
@@ -326,9 +327,10 @@ no-grad steps, not a different algorithm.
 ### LR scheduling (smooth stage)
 
 Phase 1 applies smooth-stage LR decay: the last `smooth_stage_epochs` (default
-80) iterations decay the learning rate from `lr = 0.0001` down to
-`phase2_final_lr = 0.00001`.  With `iterations=100` the smooth stage starts at
-iter 20, right after typical LLG peak, preventing post-peak drift.
+280) iterations decay the learning rate from `lr = 0.0001` down to
+`phase2_final_lr = 0.00001`.  With `iterations=300` the smooth stage starts at
+iter 20, right after the typical LLG peak, preventing post-peak drift over the
+long run.
 
 The decay formula is `lr × decay_rate^stage_step` where
 `stage_step = iteration − (iterations − smooth_stage_epochs)`.  Using the

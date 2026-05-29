@@ -416,11 +416,11 @@ def gen_config_phase1(
         ),
         execution=ExecutionConfig(
             cuda_device=0,
-            num_of_runs=3,
+            num_of_runs=1,
             verbose=False,
         ),
         algorithm=AlgorithmConfig(
-            iterations=100,
+            iterations=300,
             optimization=OptimizationParams(
                 additive_learning_rate=0.05,
                 multiplicative_learning_rate=1.0,

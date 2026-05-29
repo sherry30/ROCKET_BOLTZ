@@ -585,20 +585,21 @@ def _write_boltz2_variant_configs(
                 path=output_dir, file_id=file_id, input_pdb=pdb_path, uuid_hex=run_uuid,
             ),
             execution=ExecutionConfig(
-                cuda_device=0, num_of_runs=3, verbose=False, model="boltz2",
+                cuda_device=0, num_of_runs=1, verbose=False, model="boltz2",
             ),
             algorithm=AlgorithmConfig(
-                iterations=100,
+                iterations=300,
                 init_recycling=3,
                 optimization=OptimizationParams(
                     # The channel-wise pair bias is sensitive: lr=1e-3 overshoots,
-                    # lr=1e-4 is stable.  The smooth stage decays lr over the last
-                    # 80 of 100 iters (1e-4 -> 1e-5) to avoid drifting past the optimum.
+                    # lr=1e-4 is stable.  The smooth stage decays lr (1e-4 -> 1e-5)
+                    # over the last 280 of 300 iters, i.e. annealing starts ~iter 20
+                    # (right after the typical early LLG peak) to avoid post-peak drift.
                     additive_learning_rate=1e-4,
                     multiplicative_learning_rate=1e-4,
                     l2_weight=1e-7,
                     phase2_final_lr=1e-5,
-                    smooth_stage_epochs=80,
+                    smooth_stage_epochs=280,
                 ),
             ),
             data=DataConfig(
@@ -620,7 +621,7 @@ def _write_boltz2_variant_configs(
 
         phase2 = gen_config_phase2(phase1)
         phase2.note = f"phase2_boltz2_{file_id}_{label}"
-        phase2.algorithm.iterations = 500
+        phase2.algorithm.iterations = 300
         phase2.boltz2.feats_path = feats_path
         # Carry the detected R-free convention explicitly (don't rely on the copy).
         phase2.data.testset_value = testset_value
