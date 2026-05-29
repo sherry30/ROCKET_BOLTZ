@@ -109,12 +109,12 @@ def precompute_boltz2_seeds(
     cra_name      = sfc.cra_name
     RBR_LBFGS     = config.rbr_opt_algorithm == "lbfgs"
 
-    K             = getattr(config, "truncated_backprop_steps", 5)
-    n_recycling   = getattr(config, "boltz2_recycling_steps", config.init_recycling)
-    n_sampling    = getattr(config, "boltz2_num_sampling_steps", 200)
-    boltz2_ckpt   = getattr(config, "boltz2_checkpoint_path", None)
-    sampling_mode = getattr(config, "sampling_mode", "truncated_bptt")
-    ddim_steps    = getattr(config, "ddim_steps", 20)
+    K                = getattr(config, "truncated_backprop_steps", 5)
+    n_recycling      = getattr(config, "boltz2_recycling_steps", config.init_recycling)
+    n_sampling       = getattr(config, "boltz2_num_sampling_steps", 200)
+    boltz2_ckpt      = getattr(config, "boltz2_checkpoint_path", None)
+    sampling_mode    = getattr(config, "sampling_mode", "truncated_bptt")
+    ddim_steps       = getattr(config, "ddim_steps", 20)
 
     wrapper = Boltz2PairBias(
         checkpoint_path=boltz2_ckpt,
@@ -317,12 +317,14 @@ def run_boltz2_xray_refinement(
     boltz2_ckpt   = getattr(config, "boltz2_checkpoint_path", None)
     K             = getattr(config, "truncated_backprop_steps", 5)
     n_recycling   = getattr(config, "boltz2_recycling_steps", config.init_recycling)
-    n_sampling    = getattr(config, "boltz2_num_sampling_steps", 200)
-    sampling_mode = getattr(config, "sampling_mode", "truncated_bptt")
-    ddim_steps    = getattr(config, "ddim_steps", 20)
+    n_sampling       = getattr(config, "boltz2_num_sampling_steps", 200)
+    sampling_mode    = getattr(config, "sampling_mode", "truncated_bptt")
+    ddim_steps       = getattr(config, "ddim_steps", 20)
 
-    logger.info(f"Boltz-2 sampling mode: {sampling_mode}"
-                + (f" (ddim_steps={ddim_steps})" if sampling_mode == "ddim" else ""))
+    logger.info(
+        f"Boltz-2 sampling mode: {sampling_mode}"
+        + (f" (ddim_steps={ddim_steps})" if sampling_mode == "ddim" else "")
+    )
 
     wrapper = Boltz2PairBias(
         checkpoint_path=boltz2_ckpt,
@@ -641,7 +643,9 @@ def run_boltz2_xray_refinement(
                     break
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_([w_pair, b_pair], max_norm=10.0)
+            torch.nn.utils.clip_grad_norm_(
+                [w_pair, b_pair], max_norm=config.grad_clip_norm
+            )
 
             # Apply smooth LR decay in the final smooth_stage_epochs iterations
             if ("phase1" in config.note) and (smooth_stage_epochs is not None):

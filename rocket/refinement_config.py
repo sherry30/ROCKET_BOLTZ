@@ -62,6 +62,7 @@ class OptimizationParams(BaseModel):
     smooth_stage_epochs: int | None = 50
     phase2_final_lr: float = 1e-4
     l2_weight: float = 1e-7
+    grad_clip_norm: float = 10.0  # max gradient norm for bias params
 
 
 # Feature flags
@@ -206,6 +207,7 @@ class RocketRefinmentConfig(BaseModel):
         "smooth_stage_epochs": "algorithm.optimization.smooth_stage_epochs",
         "phase2_final_lr": "algorithm.optimization.phase2_final_lr",
         "l2_weight": "algorithm.optimization.l2_weight",
+        "grad_clip_norm": "algorithm.optimization.grad_clip_norm",
         # Features
         "solvent": "algorithm.features.solvent",
         "sfc_scale": "algorithm.features.sfc_scale",

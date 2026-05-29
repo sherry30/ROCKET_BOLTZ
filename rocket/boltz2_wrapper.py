@@ -663,11 +663,11 @@ class Boltz2PairBias(nn.Module):
             # gamma=0: no stochastic inflation → t_hat = sigma_tm exactly
             t_hat = sigma_tm
 
-            # Per-step activation checkpointing: trade recomputation for memory.
-            # Without this, all n DiffusionTransformer forward passes are held in
-            # memory simultaneously (~1.2 GB/step for 1lj5; more for larger proteins).
-            # With checkpointing, only atom_coords I/O is stored; internals are
-            # recomputed during backward — memory usage drops to ~O(1) extra per step.
+            # Per-step activation checkpointing: only atom_coords I/O is stored;
+            # the DiffusionTransformer internals are recomputed during backward.
+            # Recompute costs ~0.4s/iter for 20 steps (the diffusion net is small
+            # relative to the PairFormer trunk) while saving ~22 GB VRAM for 1lj5
+            # and keeping memory ~O(1) per step — essential for larger proteins.
             def _denoise_step(_coords, _t_hat=t_hat, _kw=network_condition_kwargs):
                 return diff_module.preconditioned_network_forward(
                     _coords, _t_hat, network_condition_kwargs=_kw,
