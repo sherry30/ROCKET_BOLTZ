@@ -533,9 +533,36 @@ def _detect_testset_value(mtz_path: str, free_label: str = "R-free-flags") -> in
     return detect_testset_value(mtz_path, free_label)
 
 
-def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
-    """Generate feats_boltz2.pkl and Boltz-2 ROCKET config YAMLs."""
-    from ..refinement_boltz2 import prepare_boltz2_feats
+# Boltz-2 sampling-mode variants written by every preprocess run.  Each becomes a
+# phase-1 + phase-2 config pair under <output_dir>/configs/.  Edit this one table
+# to change which modes are produced.
+#   label:           (sampling_mode,    diffusion_steps, backprop_last_k)
+BOLTZ2_VARIANTS = {
+    "single_step":    ("single_step",    200, None),  # ConForNets one-step (denoiser x0 at σ_max)
+    "ddim_50":        ("ddim",           50,  None),  # recommended: full-gradient DDIM, 50 steps
+    "ddim_truncated": ("ddim",           200, 20),    # deterministic, grad through last 20 of 200
+    "tbptt":          ("truncated_bptt", 200, 20),    # original stochastic TBPTT
+}
+BOLTZ2_RECYCLING_STEPS = 10  # trunk recycling iterations for all generated configs
+
+
+def _write_boltz2_variant_configs(
+    output_dir: str,
+    file_id: str,
+    pdb_path: str,
+    checkpoint: str,
+    feats_path: str,
+    datamode: str,
+    testset_value: int,
+    seg_id: list | None = None,
+) -> str:
+    """Write phase-1 + phase-2 config pairs for every ``BOLTZ2_VARIANTS`` mode
+    into ``<output_dir>/configs/``.  Returns the configs directory.
+
+    All variants share one run uuid and differ only by ``note`` (so their outputs
+    land in distinct ``ROCKET_outputs/<uuid>/<note>/`` subdirs) and by the three
+    sampling fields (sampling_mode, diffusion_steps, backprop_last_k).
+    """
     from ..refinement_config import (
         AlgorithmConfig,
         AlphaFoldConfig,
@@ -546,6 +573,70 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
         PathConfig,
         RocketRefinmentConfig,
     )
+
+    configs_dir = os.path.join(output_dir, "configs")
+    os.makedirs(configs_dir, exist_ok=True)
+    run_uuid = uuid.uuid4().hex[:10]
+
+    for label, (mode, dsteps, klast) in BOLTZ2_VARIANTS.items():
+        phase1 = RocketRefinmentConfig(
+            note=f"phase1_boltz2_{file_id}_{label}",
+            paths=PathConfig(
+                path=output_dir, file_id=file_id, input_pdb=pdb_path, uuid_hex=run_uuid,
+            ),
+            execution=ExecutionConfig(
+                cuda_device=0, num_of_runs=3, verbose=False, model="boltz2",
+            ),
+            algorithm=AlgorithmConfig(
+                iterations=100,
+                init_recycling=3,
+                optimization=OptimizationParams(
+                    # The channel-wise pair bias is sensitive: lr=1e-3 overshoots,
+                    # lr=1e-4 is stable.  The smooth stage decays lr over the last
+                    # 80 of 100 iters (1e-4 -> 1e-5) to avoid drifting past the optimum.
+                    additive_learning_rate=1e-4,
+                    multiplicative_learning_rate=1e-4,
+                    l2_weight=1e-7,
+                    phase2_final_lr=1e-5,
+                    smooth_stage_epochs=80,
+                ),
+            ),
+            data=DataConfig(
+                datamode=datamode, min_resolution=3.0, testset_value=testset_value,
+            ),
+            alphafold=AlphaFoldConfig(use_deepspeed_evo_attention=False),
+            boltz2=Boltz2Config(
+                boltz2_checkpoint_path=checkpoint,
+                boltz2_recycling_steps=BOLTZ2_RECYCLING_STEPS,
+                feats_path=feats_path,
+                sampling_mode=mode,
+                diffusion_steps=dsteps,
+                backprop_last_k=klast,
+            ),
+        )
+        if seg_id:
+            phase1.algorithm.domain_segs = seg_id
+        phase1.to_yaml_file(os.path.join(configs_dir, f"ROCKET_config_phase1_{label}.yaml"))
+
+        phase2 = gen_config_phase2(phase1)
+        phase2.note = f"phase2_boltz2_{file_id}_{label}"
+        phase2.algorithm.iterations = 500
+        phase2.boltz2.feats_path = feats_path
+        # Carry the detected R-free convention explicitly (don't rely on the copy).
+        phase2.data.testset_value = testset_value
+        phase2.data.free_flag = phase1.data.free_flag
+        phase2.to_yaml_file(os.path.join(configs_dir, f"ROCKET_config_phase2_{label}.yaml"))
+
+    logger.info(
+        f"Saved {2 * len(BOLTZ2_VARIANTS)} Boltz-2 configs "
+        f"({', '.join(BOLTZ2_VARIANTS)}; phase1+phase2 each) → {configs_dir}"
+    )
+    return configs_dir
+
+
+def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
+    """Generate feats_boltz2.pkl and the Boltz-2 ROCKET config YAMLs (all modes)."""
+    from ..refinement_boltz2 import prepare_boltz2_feats
 
     output_dir = os.path.abspath(args.output_dir)
     rocket_inputs = os.path.join(output_dir, "ROCKET_inputs")
@@ -570,79 +661,19 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     edata_path = os.path.join(rocket_inputs, f"{args.file_id}-Edata.mtz")
     testset_value = _detect_testset_value(edata_path)
 
-    run_uuid = uuid.uuid4().hex[:10]
-    phase1_config = RocketRefinmentConfig(
-        note=f"phase1_boltz2_{args.file_id}",
-        paths=PathConfig(
-            path=output_dir,
-            file_id=args.file_id,
-            input_pdb=pdb_path,
-            uuid_hex=run_uuid,
-        ),
-        execution=ExecutionConfig(
-            cuda_device=0,
-            num_of_runs=3,
-            verbose=False,
-            model="boltz2",
-        ),
-        algorithm=AlgorithmConfig(
-            iterations=100,
-            init_recycling=3,
-            optimization=OptimizationParams(
-                # The channel-wise pair bias is sensitive: lr=1e-3 overshoots,
-                # lr=1e-4 is stable. The smooth stage decays the LR over the last
-                # 80 of 100 iterations (1e-4 -> 1e-5) to avoid drifting past the optimum.
-                additive_learning_rate=1e-4,
-                multiplicative_learning_rate=1e-4,
-                l2_weight=1e-7,
-                phase2_final_lr=1e-5,
-                smooth_stage_epochs=80,
-            ),
-        ),
-        data=DataConfig(
-            datamode=args.method, min_resolution=3.0, testset_value=testset_value
-        ),
-        alphafold=AlphaFoldConfig(use_deepspeed_evo_attention=False),
-        boltz2=Boltz2Config(
-            boltz2_checkpoint_path=checkpoint,
-            boltz2_recycling_steps=3,
-            feats_path=feats_path,
-            sampling_mode=getattr(args, "sampling_mode", "ddim"),
-            # Default ddim grads through every step, so keep it short (50);
-            # truncated_bptt runs the full 200 and grads only the last K.
-            diffusion_steps=(
-                getattr(args, "diffusion_steps", None)
-                or (50 if getattr(args, "sampling_mode", "ddim") == "ddim" else 200)
-            ),
-            # null ⇒ full gradient (default for ddim); truncated_bptt → last 20.
-            backprop_last_k=(
-                getattr(args, "backprop_last_k", None)
-                or (20 if getattr(args, "sampling_mode", "ddim") == "truncated_bptt" else None)
-            ),
-        ),
+    # Write a phase-1 + phase-2 config pair for every sampling mode (see
+    # BOLTZ2_VARIANTS) into <output_dir>/configs/.  The diffusion seed pre-scan
+    # runs inline at the start of rk.refine, so there is no precompute step here.
+    _write_boltz2_variant_configs(
+        output_dir=output_dir,
+        file_id=args.file_id,
+        pdb_path=pdb_path,
+        checkpoint=checkpoint,
+        feats_path=feats_path,
+        datamode=args.method,
+        testset_value=testset_value,
+        seg_id=seg_id,
     )
-    if seg_id:
-        phase1_config.algorithm.domain_segs = seg_id
-
-    # Note: the diffusion seed pre-scan runs inline at the start of rk.refine,
-    # in the same sampling mode as refinement (no precompute step here).
-
-    phase1_yaml = os.path.join(output_dir, "ROCKET_config_phase1_boltz2.yaml")
-    phase1_config.to_yaml_file(phase1_yaml)
-    logger.info(f"Saved Phase-1 config → {phase1_yaml}")
-
-    phase2_config = gen_config_phase2(phase1_config)
-    phase2_config.note = f"phase2_boltz2_{args.file_id}"
-    phase2_config.algorithm.iterations = 500
-    phase2_config.boltz2.feats_path = feats_path
-    # Carry the detected R-free convention explicitly (don't rely on the copy
-    # inheriting it) so phase 2 holds out the same test set as phase 1.
-    phase2_config.data.testset_value = testset_value
-    phase2_config.data.free_flag = phase1_config.data.free_flag
-
-    phase2_yaml = os.path.join(output_dir, "ROCKET_config_phase2_boltz2.yaml")
-    phase2_config.to_yaml_file(phase2_yaml)
-    logger.info(f"Saved Phase-2 config → {phase2_yaml}")
 
 
 def parse_args():
@@ -678,25 +709,9 @@ def parse_args():
     parser.add_argument("--map1", default=None)
     parser.add_argument("--map2", default=None)
     parser.add_argument("--full_composition", default=None)
-    parser.add_argument(
-        "--sampling_mode",
-        choices=["truncated_bptt", "single_step", "ddim"],
-        default="ddim",
-        help="Boltz-2 gradient mode: truncated_bptt (original stochastic TBPTT), "
-             "single_step (ConForNets one-step), or ddim (deterministic). Default: ddim.",
-    )
-    parser.add_argument(
-        "--diffusion_steps", type=int, default=None,
-        help="Number of diffusion steps for trajectory modes (default: 50 for "
-             "ddim, 200 for truncated_bptt).",
-    )
-    parser.add_argument(
-        "--backprop_last_k", type=int, default=None,
-        help="Keep the gradient through only the last K diffusion steps (ddim & "
-             "truncated_bptt).  Default: None (full gradient) for ddim, 20 for "
-             "truncated_bptt.  Use e.g. --sampling_mode ddim --diffusion_steps 200 "
-             "--backprop_last_k 20 for the deterministic truncated-backprop benchmark.",
-    )
+    # Boltz-2 sampling modes are no longer selected here: rk.preprocess writes a
+    # config pair for every mode in BOLTZ2_VARIANTS under <output_dir>/configs/.
+    # Edit that table (top of this module) to change which modes are produced.
 
     args = parser.parse_args()
 

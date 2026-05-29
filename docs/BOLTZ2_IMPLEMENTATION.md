@@ -121,7 +121,12 @@ What this does internally:
 7. Auto-detects the R-free **test-set value** from the Edata (the minority flag
    value) and writes it as `testset_value` in **both** the phase-1 **and**
    phase-2 configs
-8. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
+8. Writes a **phase-1 + phase-2 config pair for every sampling mode** into
+   `configs/` — one `ROCKET_config_phase{1,2}_<mode>.yaml` per entry in the
+   `BOLTZ2_VARIANTS` table (`single_step`, `ddim_50`, `ddim_truncated`, `tbptt`).  All
+   share one run uuid and differ only by `note` + the sampling fields, so their
+   outputs land in distinct `ROCKET_outputs/<uuid>/<note>/` subdirs.  Edit the
+   `BOLTZ2_VARIANTS` table at the top of `run_preprocess.py` to change the set.
 
 **R-free convention note**: programs disagree on which flag value is the test
 set (CCP4 `FreeR_flag` uses 0, phenix `R-free-flags` uses 1).  SFcalculator
@@ -144,14 +149,21 @@ Output layout:
     1lj5-pred-aligned.pdb
     1lj5-Edata.mtz
     feats_boltz2.pkl
-  ROCKET_config_phase1_boltz2.yaml
-  ROCKET_config_phase2_boltz2.yaml
+  configs/
+    ROCKET_config_phase1_single_step.yaml    # ConForNets one-step
+    ROCKET_config_phase2_single_step.yaml
+    ROCKET_config_phase1_ddim_50.yaml        # recommended (full-grad DDIM, 50 steps)
+    ROCKET_config_phase2_ddim_50.yaml
+    ROCKET_config_phase1_ddim_truncated.yaml # deterministic, grad last 20 of 200
+    ROCKET_config_phase2_ddim_truncated.yaml
+    ROCKET_config_phase1_tbptt.yaml          # original stochastic TBPTT
+    ROCKET_config_phase2_tbptt.yaml
 ```
 
-**Step 2 — Phase 1 refinement (GPU node)**
+**Step 2 — Phase 1 refinement (GPU node)** — pick a mode's config:
 
 ```bash
-rk.refine 1lj5_processed/ROCKET_config_phase1_boltz2.yaml
+rk.refine 1lj5_processed/configs/ROCKET_config_phase1_ddim_50.yaml
 ```
 
 The feats path is embedded in the config — no extra flags needed.  At the start
@@ -160,18 +172,19 @@ mode as refinement; see "Seed pre-scan" below), then `num_of_runs` independent
 traces run from the best seeds, saving:
 
 ```
-1lj5_processed/ROCKET_outputs/<uuid>/phase1_boltz2_1lj5/
+1lj5_processed/ROCKET_outputs/<uuid>/phase1_boltz2_1lj5_ddim_50/
   best_model_A_18.pdb       # best structure
   best_w_pair_A_18.pt       # channel-wise weight matrix  [128, 128]
   best_b_pair_A_18.pt       # channel-wise bias vector    [128]
   NEG_LLG_it_A.npy, rwork_it_A.npy, rfree_it_A.npy, …
   seed_scan.npy             # scan results (LLG, seed) for this run
+  phase1_best.json          # best run's {run, iter, seed, neg_llg}
 ```
 
-**Step 3 — Phase 2 refinement (GPU node)**
+**Step 3 — Phase 2 refinement (GPU node)** — use the same mode's phase-2 config:
 
 ```bash
-rk.refine 1lj5_processed/ROCKET_config_phase2_boltz2.yaml
+rk.refine 1lj5_processed/configs/ROCKET_config_phase2_ddim_50.yaml
 ```
 
 Phase 2 warm-starts from the Phase-1 best `w_pair`/`b_pair`, lower LR, no L2,
@@ -401,7 +414,7 @@ import pickle
 from rocket import run_boltz2_xray_refinement
 
 feats = pickle.load(open("ROCKET_inputs/feats_boltz2.pkl", "rb"))
-run_boltz2_xray_refinement("ROCKET_config_phase1_boltz2.yaml", feats)
+run_boltz2_xray_refinement("configs/ROCKET_config_phase1_ddim_50.yaml", feats)
 ```
 
 `run_refinement` (used by `rk.refine`) also accepts the config path directly
