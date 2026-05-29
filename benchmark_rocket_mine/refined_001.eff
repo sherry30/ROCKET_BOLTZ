@@ -1,5 +1,5 @@
 # Effective refinement parameters
-# Date 2026-05-29 Time 06:07:57 CEST +0200 (1780027677.89 s)
+# Date 2026-05-29 Time 06:28:40 CEST +0200 (1780028920.46 s)
 
 # Command to extract only non-defaults:
 #   phenix.refine --diff_params "refined_001.eff"
@@ -10,10 +10,10 @@ data_manager {
   restraint_files = None
   default_restraint = None
   model {
-    file = "input.pdb"
+    file = "superposed_start.pdb"
     type = *x_ray neutron electron reference
   }
-  default_model = "input.pdb"
+  default_model = "superposed_start.pdb"
   miller_array {
     file = "/data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_data/1lj5-tng_withrfree.mtz"
     labels {

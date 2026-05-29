@@ -481,10 +481,19 @@ to improve real R-factors.  The remaining work is tuning and validation:
    `grad_clip_norm` ≤ 0.5.
 
 3. **Always validate on real R-factors**, not ROCKET's internal Rwork (which is
-   flat/uninformative).  Benchmark pipeline: raw `model_vs_data` → `phenix.refine`
-   → refined `model_vs_data` → superpose to pdb_redo → map-model CC.  (See
-   `benchmark_rocket.sh`.)  Measure both raw and post-refine R-factors, since
-   refinement can mask differences between starting models.
+   flat/uninformative).  Benchmark pipeline (`benchmark_rocket.sh`):
+   raw `model_vs_data` (native frame) → **superpose onto pdb_redo** →
+   `phenix.refine` → refined `model_vs_data` → map-model CC → refined-vs-truth RMSD.
+   Measure both raw and post-refine R-factors, since refinement can mask
+   differences between starting models.
+
+   **Superpose BEFORE refine** (not after).  Map-model CC compares to a phased
+   MAP tied to the ground-truth frame; superposing first puts the model in that
+   frame and refinement keeps it there, giving an accurate in-frame CC.  Refining
+   first then overlaying leaves a rigid-fit residual (~2 Å for 1lj5) that
+   under-measures the CC (0.77 vs 0.84 main-chain on the same model).  R-factors
+   are frame-invariant so they are unaffected; superposition leaks no structural
+   info, so the comparison stays fair if the same pipeline is used for all models.
 
 4. **Isolate the coordinate contribution.** The improvement may partly come from
    changed pseudo-B factors.  Re-run `model_vs_data` with B-factors fixed to

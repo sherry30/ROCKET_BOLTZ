@@ -1,34 +1,34 @@
 ============================================================
  BENCHMARK: rocket_mine
- input:   /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_processed/ROCKET_outputs/6783e231fb/phase1/best_model_A_82.pdb
+ input:   /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_processed/ROCKET_outputs/6783e231fb/phase1/A_trajectory_82.pdb
  exp-mtz: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_data/1lj5-tng_withrfree.mtz
  ref-pdb: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/pdb_redo/1lj5/1lj5_final.pdb
  ref-mtz: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/pdb_redo/1lj5/1lj5_final.mtz
- date:    Fri May 29 06:07:46 AM CEST 2026
+ date:    Fri May 29 06:28:28 AM CEST 2026
 ============================================================
 
 [1] RAW R-factors (model as-is, native frame)
-      r_work: 0.4971
-      r_free: 0.4995
+      r_work: 0.4250
+      r_free: 0.4291
 
-[2] phenix.refine — 5 macrocycles (individual_sites+individual_adp+occupancies)
+[2] Superpose RAW model onto ground truth (-> ref frame) + pre-refine RMSD
+    RMSD between fixed and moving atoms (start): 39.839
+    RMSD between fixed and moving atoms (final): 4.822
+
+[3] phenix.refine — 5 macrocycles (individual_sites+individual_adp+occupancies)
     refined model: refined_001.pdb
 
-[3] REFINED R-factors
-      r_work: 0.4237
-      r_free: 0.4684
-
-[4] Superpose refined model onto ground truth + RMSD
-    RMSD between fixed and moving atoms (start): 42.235
-    RMSD between fixed and moving atoms (final): 10.447
+[4] REFINED R-factors
+      r_work: 0.4064
+      r_free: 0.4535
 
 [5] Map-model CC (RSCC) vs ref map (FWT,PHWT @ 1.8 A)
     Map-model CC (overall)
     **********************
-      CC_mask  : -0.0004
-      CC_volume: 0.0045
-      CC_peaks : -0.3429
-      CC_box   : 0.0081
+      CC_mask  : 0.5964
+      CC_volume: 0.5521
+      CC_peaks : 0.0791
+      CC_box   : 0.2737
     -------------------------------------------------------------------------------
     Model-map FSC
     *************
@@ -38,13 +38,17 @@
     ********************
     Per chain:
     chain ID  CC       <B>    <occ>   N atoms
-    A         0.0077  134.143 1.00    3012
+    A         0.5569   28.682 1.00    3012
     Main chain:
      CC       <B>    <occ>   N atoms
-     0.0011  136.798 1.00    1875
+     0.5844   27.952 1.00    1875
     Side chain:
      CC       <B>    <occ>   N atoms
-    -0.0053  129.763 1.00    1137
+     0.5285   29.885 1.00    1137
+
+[6] Refined model vs ground truth — RMSD (post-refine accuracy)
+    RMSD between fixed and moving atoms (start): 4.773
+    RMSD between fixed and moving atoms (final): 4.757
 
 ============================================================
  DONE. Full logs + SUMMARY.txt in /data/dust/group/it/crystalsfirst/dev/shehry/ROCKET/benchmark_rocket_mine

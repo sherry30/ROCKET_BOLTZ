@@ -1,0 +1,55 @@
+============================================================
+ BENCHMARK: ddim_10re
+ input:   /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_boltz_mod/ROCKET_outputs/b697e363d3/phase1_boltz2_1lj5_ddim_v2_10_re/best_model_A_99.pdb
+ exp-mtz: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/1lj5_data/1lj5-tng_withrfree.mtz
+ ref-pdb: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/pdb_redo/1lj5/1lj5_final.pdb
+ ref-mtz: /data/dust/group/it/crystalsfirst/dev/shehry/data/thesis/1lj5/data_for_1lj5/pdb_redo/1lj5/1lj5_final.mtz
+ date:    Fri May 29 06:24:48 AM CEST 2026
+============================================================
+
+[1] RAW R-factors (model as-is, native frame)
+      r_work: 0.4015
+      r_free: 0.3987
+
+[2] Superpose RAW model onto ground truth (-> ref frame) + pre-refine RMSD
+    RMSD between fixed and moving atoms (start): 46.322
+    RMSD between fixed and moving atoms (final): 2.026
+
+[3] phenix.refine — 5 macrocycles (individual_sites+individual_adp+occupancies)
+    refined model: refined_001.pdb
+
+[4] REFINED R-factors
+      r_work: 0.2909
+      r_free: 0.3218
+
+[5] Map-model CC (RSCC) vs ref map (FWT,PHWT @ 1.8 A)
+    Map-model CC (overall)
+    **********************
+      CC_mask  : 0.8621
+      CC_volume: 0.7878
+      CC_peaks : 0.2770
+      CC_box   : 0.4076
+    -------------------------------------------------------------------------------
+    Model-map FSC
+    *************
+      saved to: map_model_fsc.log
+    -------------------------------------------------------------------------------
+    Map-model CC (local)
+    ********************
+    Per chain:
+    chain ID  CC       <B>    <occ>   N atoms
+    A         0.8084   20.216 1.00    3012
+    Main chain:
+     CC       <B>    <occ>   N atoms
+     0.8415   18.487 1.00    1875
+    Side chain:
+     CC       <B>    <occ>   N atoms
+     0.7847   23.066 1.00    1137
+
+[6] Refined model vs ground truth — RMSD (post-refine accuracy)
+    RMSD between fixed and moving atoms (start): 1.925
+    RMSD between fixed and moving atoms (final): 1.900
+
+============================================================
+ DONE. Full logs + SUMMARY.txt in /data/dust/group/it/crystalsfirst/dev/shehry/ROCKET/benchmark_ddim_10re
+============================================================

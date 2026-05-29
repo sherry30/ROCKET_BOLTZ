@@ -4,15 +4,23 @@
 #
 # Generic across proteins: all data paths and parameters are passed as flags.
 #
-# Metric order (important — see notes at bottom):
-#   1. RAW R-factors        — model as-is, native MR frame (direct ROCKET effect)
-#   2. phenix.refine        — N macrocycles, native frame
-#   3. REFINED R-factors    — practical end-quality
-#   4. superpose -> ref_pdb + RMSD to ground truth        (skipped if no --ref-pdb)
-#   5. map-model CC (RSCC) vs ref_mtz ground-truth map    (skipped if no --ref-mtz)
+# Metric order:
+#   1. RAW R-factors     — model as-is, NATIVE frame (direct ROCKET effect)
+#   2. superpose RAW -> ref_pdb (BEFORE refine) + pre-refine RMSD   [needs --ref-pdb]
+#   3. phenix.refine     — N macrocycles (in ref frame if superposed)
+#   4. REFINED R-factors — practical end-quality
+#   5. map-model CC (RSCC) vs ref_mtz map — refined model, in-frame [needs --ref-mtz]
+#   6. refined-vs-truth RMSD (post-refine accuracy)                 [needs --ref-pdb]
 #
-# R-factors are measured in the NATIVE frame (steps 1-3); superposition onto the
-# deposited structure happens LAST and only for closeness-to-truth metrics.
+# Why superpose BEFORE refine (when a ground-truth pdb is given):
+#   map-model CC compares to a phased MAP, which is tied to the ground-truth
+#   crystallographic frame.  Superposing first puts the model in that frame;
+#   refinement against the same-crystal data then keeps it there and snaps atoms
+#   into the density -> accurate in-frame CC.  Refining first (native frame) then
+#   overlaying afterwards leaves a rigid-fit residual that under-measures the CC.
+#   R-factors are frame-invariant, so raw R is still measured in the native frame.
+#   Superposition is a pure rigid placement — it leaks no structural info, so the
+#   comparison stays fair as long as the SAME pipeline is used for every model.
 #
 # Requires phenix on PATH (e.g. `micromamba activate rocket-of` on the GPU node).
 # ============================================================================
@@ -119,59 +127,81 @@ phenix.model_vs_data input.pdb "$EXP_MTZ" \
 grab 1_raw_mvd.log | tee -a "$SUMMARY"
 
 if [ "$SKIP_REFINE" -eq 1 ]; then
-    log ""; log "[2-5] skipped (--skip-refine)"; log "DONE. Logs in $(pwd)"; exit 0
+    log ""; log "[2-6] skipped (--skip-refine)"; log "DONE. Logs in $(pwd)"; exit 0
 fi
 
-# ---- 2. phenix.refine -----------------------------------------------------
+# ---- 2. superpose RAW model onto ground truth (BEFORE refine) -------------
+#
+# Why superpose first: map-model CC (step 5) compares the model to the pdb_redo
+# MAP, which carries phases tied to a specific crystallographic frame/origin.
+# Superposing first puts the model in that frame; refinement against the
+# (same-crystal) experimental data then keeps it there and snaps atoms precisely
+# into the density -> accurate, in-frame map CC.  Refining first in the native MR
+# frame and superposing afterwards leaves a rigid-overlay residual that
+# artificially lowers the map CC.  R-factors are frame-invariant, so this does
+# not affect them (raw R is measured above in the native frame).
 log ""
-log "[2] phenix.refine — $MACROCYCLES macrocycles ($STRATEGY)"
-phenix.refine input.pdb "$EXP_MTZ" \
+REFINE_INPUT=input.pdb
+if [ -n "$REF_PDB" ]; then
+    log "[2] Superpose RAW model onto ground truth (-> ref frame) + pre-refine RMSD"
+    phenix.superpose_pdbs "$REF_PDB" input.pdb \
+        file_name=superposed_start.pdb > 2_superpose_start.log 2>&1 || true
+    grep -iE "rmsd|r.m.s" 2_superpose_start.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
+    [ -f superposed_start.pdb ] && REFINE_INPUT=superposed_start.pdb
+else
+    log "[2] (no --ref-pdb; refining in native frame, RSCC will be skipped)"
+fi
+
+# ---- 3. phenix.refine -----------------------------------------------------
+log ""
+log "[3] phenix.refine — $MACROCYCLES macrocycles ($STRATEGY)"
+phenix.refine "$REFINE_INPUT" "$EXP_MTZ" \
     data_manager.miller_array.labels.name="$FREE_LABEL" \
     refinement.main.number_of_macro_cycles="$MACROCYCLES" \
     refinement.refine.strategy="$STRATEGY" \
     output.prefix=refined output.serial=1 \
     allow_polymer_cross_special_position=True \
-    --overwrite > 2_refine.log 2>&1 || true
+    --overwrite > 3_refine.log 2>&1 || true
 REFINED_PDB=$(ls -t refined_*.pdb 2>/dev/null | head -1 || true)
-log "    refined model: ${REFINED_PDB:-NONE (see 2_refine.log)}"
+log "    refined model: ${REFINED_PDB:-NONE (see 3_refine.log)}"
 
-# ---- 3. REFINED R-factors -------------------------------------------------
+# ---- 4. REFINED R-factors -------------------------------------------------
 log ""
-log "[3] REFINED R-factors"
+log "[4] REFINED R-factors"
 if [ -n "${REFINED_PDB:-}" ]; then
     phenix.model_vs_data "$REFINED_PDB" "$EXP_MTZ" \
-        r_free_flags_label="$FREE_LABEL" > 3_refined_mvd.log 2>&1 || true
-    grab 3_refined_mvd.log | tee -a "$SUMMARY"
+        r_free_flags_label="$FREE_LABEL" > 4_refined_mvd.log 2>&1 || true
+    grab 4_refined_mvd.log | tee -a "$SUMMARY"
 else
     log "    (refine failed)"
 fi
 
-# ---- 4. superpose onto ground truth + RMSD --------------------------------
-log ""
-if [ -n "$REF_PDB" ] && [ -n "${REFINED_PDB:-}" ]; then
-    log "[4] Superpose refined model onto ground truth + RMSD"
-    phenix.superpose_pdbs "$REF_PDB" "$REFINED_PDB" \
-        file_name=superposed.pdb > 4_superpose.log 2>&1 || true
-    grep -iE "rmsd|r.m.s" 4_superpose.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
-else
-    log "[4] skipped (no --ref-pdb or no refined model)"
-fi
-
 # ---- 5. map-model CC (RSCC) vs ground-truth map ---------------------------
+#
+# The refined model is already in the ground-truth frame (superposed before
+# refine), so map_correlations runs on it directly — no post-refine overlay.
 log ""
-if [ -n "$REF_MTZ" ] && [ -f superposed.pdb ]; then
+if [ -n "$REF_MTZ" ] && [ -n "$REF_PDB" ] && [ -n "${REFINED_PDB:-}" ]; then
     log "[5] Map-model CC (RSCC) vs ref map ($REF_MAP_LABELS @ ${RESOLUTION} A)"
-    phenix.map_correlations superposed.pdb \
+    phenix.map_correlations "$REFINED_PDB" \
         input_files.map_coeffs_1="$REF_MTZ" \
         input_files.map_coeffs_labels_1="$REF_MAP_LABELS" \
         map_model_cc.resolution="$RESOLUTION" > 5_mapcc.log 2>&1 || true
-    # Extract the whole CC block (overall + per-chain + main/side chain values).
-    # The main/side-chain CC values sit on the line *after* their column header,
-    # so a simple line-grep misses them — extract the contiguous block instead.
     awk '/Map-model CC \(overall\)/{f=1} /Per residue:/{exit} f' 5_mapcc.log \
         | sed 's/^/    /' | tee -a "$SUMMARY"
 else
-    log "[5] skipped (no --ref-mtz or no superposed model)"
+    log "[5] skipped (need both --ref-pdb and --ref-mtz, plus a refined model)"
+fi
+
+# ---- 6. refined-vs-truth RMSD (post-refine accuracy) ----------------------
+log ""
+if [ -n "$REF_PDB" ] && [ -n "${REFINED_PDB:-}" ]; then
+    log "[6] Refined model vs ground truth — RMSD (post-refine accuracy)"
+    phenix.superpose_pdbs "$REF_PDB" "$REFINED_PDB" \
+        file_name=refined_superposed.pdb > 6_superpose_refined.log 2>&1 || true
+    grep -iE "rmsd|r.m.s" 6_superpose_refined.log | head -4 | sed 's/^/    /' | tee -a "$SUMMARY"
+else
+    log "[6] skipped (no --ref-pdb or no refined model)"
 fi
 
 log ""
