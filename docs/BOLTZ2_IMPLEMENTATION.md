@@ -195,6 +195,7 @@ boltz2:
   boltz2_num_sampling_steps: 200          # total diffusion steps T
   sampling_mode: ddim                     # truncated_bptt | single_step | ddim
   ddim_steps: 20                          # deterministic steps for ddim mode
+  reuse_phase1_seed: true                 # phase 2: continue from phase-1's seed
 ```
 
 **Sampling mode note**: `ddim` (deterministic N-step) gives the cleanest gradient
@@ -205,7 +206,11 @@ real R-factors.  See `BOLTZ2_PAIR_BIAS_ANALYSIS.md` for the full comparison.
 **Seed pre-scan**: runs **inline** at the start of `rk.refine`, in the same
 sampling mode as refinement (see "Seed pre-scan" under Optimization details).
 There is no precompute step or stored seed-scan file to keep in sync — the scan
-and the refinement forward pass always agree by construction.
+and the refinement forward pass always agree by construction.  **Phase 2 does
+not re-scan**: with `reuse_phase1_seed` (default true) it reuses the exact seed
+phase 1 ended on, so the warm-started bias stays matched to its diffusion
+trajectory (re-scanning at identity would drop the learned bias onto a
+mismatched seed — see "Phase-2 seed reuse" under Optimization details).
 
 **B-factor note**: `coordinates_boltz2.py` now uses Boltz-2's direct `bfactor_module`
 prediction when available (`model.predict_bfactor=True`, which is the case for
@@ -274,7 +279,27 @@ forward pass always agree — there is no separate precompute step or stored
 seed-scan file to keep in sync.
 
 Scan results are saved to `{out_dir}/seed_scan.npy` as `(LLG, seed)` pairs for
-the record.
+the record.  Phase 1 also writes `{out_dir}/phase1_best.json`
+(`{run, iter, seed, neg_llg}`) recording the seed of the best run.
+
+### Phase-2 seed reuse
+
+Phase 2 is a continuation of phase 1's solution (warm-started from
+`best_w_pair`/`best_b_pair`), so it must run on the **same diffusion seed** the
+bias was optimised for.  In a deterministic sampler the structure is
+`f(bias, seed)`, and the learned bias is co-adapted to one seed's trajectory;
+re-scanning seeds — especially the old behaviour of scanning at *identity* bias —
+would select a different seed and drop the warm-started bias onto a trajectory it
+was never tuned for, discarding most of phase 1's gain.
+
+With `boltz2.reuse_phase1_seed` (default true), phase 2 therefore **skips the
+scan** and reuses the phase-1 seed, recovered from the phase-1 output dir
+(`_phase1_seed_from_starting_bias`): it reads `phase1_best.json` if present, else
+falls back to the top seed in `seed_scan.npy` (correct when the best run is the
+first selected seed, e.g. `num_of_runs=1`).  If the seed cannot be recovered it
+warns and falls back to a scan.  Set `reuse_phase1_seed: false` only to
+deliberately test whether the bias transfers to new seeds (an evaluation
+experiment, not production refinement).
 
 ### Rwork interpretation
 

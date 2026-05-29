@@ -41,6 +41,43 @@ from rocket.wandb_logger import WandbLogger
 from rocket.xtal import structurefactors as llg_sf
 
 
+def _phase1_seed_from_starting_bias(config) -> Optional[int]:
+    """Recover the diffusion seed phase 1 ended on, from the phase-1 output dir.
+
+    The phase-1 directory is the parent of the warm-start bias path
+    (``config.starting_bias``).  Prefer the explicit ``phase1_best.json`` written
+    by phase 1; fall back to the top seed in ``seed_scan.npy`` (correct when the
+    best run is the first selected seed, e.g. num_of_runs=1).  Returns ``None``
+    if nothing usable is found.
+    """
+    import glob as _glob
+    import json
+
+    if not config.starting_bias:
+        return None
+    matches = _glob.glob(config.starting_bias)
+    if not matches:
+        return None
+    phase1_dir = os.path.dirname(matches[0])
+
+    meta = os.path.join(phase1_dir, "phase1_best.json")
+    if os.path.exists(meta):
+        try:
+            with open(meta) as fh:
+                return int(json.load(fh)["seed"])
+        except Exception as exc:
+            logger.warning(f"Could not read seed from {meta}: {exc}")
+
+    scan = os.path.join(phase1_dir, "seed_scan.npy")
+    if os.path.exists(scan):
+        try:
+            arr = np.load(scan)  # (n, 2): (LLG, seed) sorted by LLG desc
+            return int(arr[0, 1])
+        except Exception as exc:
+            logger.warning(f"Could not read seed from {scan}: {exc}")
+    return None
+
+
 def run_boltz2_xray_refinement(
     config: RocketRefinmentConfig | str,
     feats: dict,
@@ -253,6 +290,7 @@ def run_boltz2_xray_refinement(
     best_b_pair    = None
     best_run       = None
     best_iter      = None
+    best_seed      = None
     best_pos       = reference_pos.clone()
 
     cra_name = sfc.cra_name  # list of "chain-resid-resname-atomname"
@@ -270,53 +308,73 @@ def run_boltz2_xray_refinement(
     # Running it inline each time guarantees the scan and the refinement forward
     # pass agree.
     # ------------------------------------------------------------------
-    n_scan = max(config.num_of_runs * 3, 6)
-    logger.info(f"Seed pre-scan: evaluating {n_scan} seeds with identity bias "
-                f"(mode={sampling_mode}) …")
-    wrapper.init_bias(device)   # identity init — not used for grad
-    scan_llg_by_seed = []
+    # Phase 2 (warm-start): reuse the seed phase 1 ended on rather than re-scanning.
+    # The learned bias is co-adapted to its diffusion trajectory, so re-scanning
+    # (especially at identity) would drop the bias onto a mismatched seed and
+    # discard much of the warm-start.  Reusing the seed makes phase 2 a true
+    # continuation.  Controlled by boltz2.reuse_phase1_seed (default True).
+    reuse_seed = ("phase2" in config.note) and getattr(config, "reuse_phase1_seed", True)
+    phase1_seed = _phase1_seed_from_starting_bias(config) if reuse_seed else None
 
-    for seed in range(n_scan):
-        wrapper.diffusion_seed = seed
-        # Only the model forward is in no_grad; SFC ops (update_sigmaA,
-        # get_scales_adam) call their own internal backward() and must be
-        # outside no_grad.
-        with torch.no_grad():
-            model_scan = wrapper(feats_gpu, recycling_steps=n_recycling,
-                                  num_sampling_steps=n_sampling)
-            xyz_scan, _, pseudo_Bs_scan = position_alignment_boltz2(
-                model_output=model_scan, feats=feats_gpu,
-                cra_name_sfc=cra_name, best_pos=reference_pos,
+    if phase1_seed is not None:
+        selected_seeds = [phase1_seed]
+        logger.info(
+            f"Phase-2: reusing phase-1 seed {phase1_seed} (skipping seed scan; "
+            "keeps the warm-started bias matched to its diffusion trajectory)."
+        )
+    else:
+        if reuse_seed:
+            logger.warning(
+                "reuse_phase1_seed is set but the phase-1 seed could not be "
+                "recovered from the phase-1 output dir; running a seed scan."
             )
-        xyz_scan_d  = xyz_scan.detach()
-        safe_b_scan = pseudo_Bs_scan.detach().clamp(max=200.0)
-        llgloss.sfc.atom_b_iso     = safe_b_scan
-        llgloss_rbr.sfc.atom_b_iso = safe_b_scan
-        rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_scan_d)
-        opt_xyz_scan, _ = rk_coordinates.rigidbody_refine_quat(
-            xyz_scan_d, llgloss_rbr, cra_name,
-            domain_segs=config.domain_segs,
-            lbfgs=RBR_LBFGS,
-            added_chain_HKL=constant_fp_added_HKL,
-            added_chain_asu=constant_fp_added_asu,
-            lbfgs_lr=config.rbr_lbfgs_learning_rate,
-            verbose=False,
-        )
-        llg_scan, _, _ = llgloss(
-            opt_xyz_scan, sub_ratio=1.0, solvent=config.solvent,
-            update_scales=config.sfc_scale,
-            added_chain_HKL=constant_fp_added_HKL,
-            added_chain_asu=constant_fp_added_asu,
-            return_Rfactors=True,
-        )
-        scan_llg_by_seed.append((llg_scan.item(), seed))
-        logger.info(f"  seed {seed}: LLG={llg_scan.item():.1f}")
+        n_scan = max(config.num_of_runs * 3, 6)
+        logger.info(f"Seed pre-scan: evaluating {n_scan} seeds with identity bias "
+                    f"(mode={sampling_mode}) …")
+        wrapper.init_bias(device)   # identity init — not used for grad
+        scan_llg_by_seed = []
 
-    scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
-    np.save(f"{out_dir}/seed_scan.npy", np.array(scan_llg_by_seed))
+        for seed in range(n_scan):
+            wrapper.diffusion_seed = seed
+            # Only the model forward is in no_grad; SFC ops (update_sigmaA,
+            # get_scales_adam) call their own internal backward() and must be
+            # outside no_grad.
+            with torch.no_grad():
+                model_scan = wrapper(feats_gpu, recycling_steps=n_recycling,
+                                      num_sampling_steps=n_sampling)
+                xyz_scan, _, pseudo_Bs_scan = position_alignment_boltz2(
+                    model_output=model_scan, feats=feats_gpu,
+                    cra_name_sfc=cra_name, best_pos=reference_pos,
+                )
+            xyz_scan_d  = xyz_scan.detach()
+            safe_b_scan = pseudo_Bs_scan.detach().clamp(max=200.0)
+            llgloss.sfc.atom_b_iso     = safe_b_scan
+            llgloss_rbr.sfc.atom_b_iso = safe_b_scan
+            rkrf_utils.update_sigmaA(llgloss, llgloss_rbr, xyz_scan_d)
+            opt_xyz_scan, _ = rk_coordinates.rigidbody_refine_quat(
+                xyz_scan_d, llgloss_rbr, cra_name,
+                domain_segs=config.domain_segs,
+                lbfgs=RBR_LBFGS,
+                added_chain_HKL=constant_fp_added_HKL,
+                added_chain_asu=constant_fp_added_asu,
+                lbfgs_lr=config.rbr_lbfgs_learning_rate,
+                verbose=False,
+            )
+            llg_scan, _, _ = llgloss(
+                opt_xyz_scan, sub_ratio=1.0, solvent=config.solvent,
+                update_scales=config.sfc_scale,
+                added_chain_HKL=constant_fp_added_HKL,
+                added_chain_asu=constant_fp_added_asu,
+                return_Rfactors=True,
+            )
+            scan_llg_by_seed.append((llg_scan.item(), seed))
+            logger.info(f"  seed {seed}: LLG={llg_scan.item():.1f}")
 
-    selected_seeds = [seed for _, seed in scan_llg_by_seed[: config.num_of_runs]]
-    logger.info(f"Selected seeds: {selected_seeds}  (scan: {scan_llg_by_seed})")
+        scan_llg_by_seed.sort(key=lambda x: x[0], reverse=True)
+        np.save(f"{out_dir}/seed_scan.npy", np.array(scan_llg_by_seed))
+
+        selected_seeds = [seed for _, seed in scan_llg_by_seed[: config.num_of_runs]]
+        logger.info(f"Selected seeds: {selected_seeds}  (scan: {scan_llg_by_seed})")
 
     for n, seed in enumerate(selected_seeds):
         run_id = rkrf_utils.number_to_letter(n)
@@ -479,6 +537,7 @@ def run_boltz2_xray_refinement(
                 best_b_pair = b_pair.detach().cpu().clone()
                 best_run    = run_id
                 best_iter   = iteration
+                best_seed   = seed
                 best_pos    = optimized_xyz.detach().clone()
 
             llgloss.sfc.atom_pos_orth = optimized_xyz
@@ -552,6 +611,22 @@ def run_boltz2_xray_refinement(
     # ------------------------------------------------------------------
     torch.save(best_w_pair, f"{out_dir}/best_w_pair_{best_run}_{best_iter}.pt")
     torch.save(best_b_pair, f"{out_dir}/best_b_pair_{best_run}_{best_iter}.pt")
+
+    # Record the best run's diffusion seed so phase 2 can continue from the exact
+    # trajectory this bias was optimised for (see _phase1_seed_from_starting_bias).
+    if best_seed is not None:
+        import json
+        with open(f"{out_dir}/phase1_best.json", "w") as fh:
+            json.dump(
+                {
+                    "run": best_run,
+                    "iter": best_iter,
+                    "seed": int(best_seed),
+                    "neg_llg": float(best_llg),
+                },
+                fh,
+                indent=2,
+            )
 
     if best_pos is not None:
         try:

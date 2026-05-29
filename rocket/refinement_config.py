@@ -135,6 +135,12 @@ class Boltz2Config(BaseModel):
     # ddim: N deterministic DDIM steps; cleaner gradient than truncated_bptt
     sampling_mode: str = "truncated_bptt"
     ddim_steps: int = 20  # number of steps for "ddim" mode
+    # Phase 2 only: reuse the diffusion seed phase 1 ended on (read from the
+    # phase-1 output dir) instead of re-scanning seeds.  The learned bias is
+    # co-adapted to its trajectory, so reusing the seed keeps phase 2 a true
+    # continuation; re-scanning at identity would drop the bias onto a mismatched
+    # seed.  Has no effect on phase 1.
+    reuse_phase1_seed: bool = True
 
 
 class MonitoringConfig(BaseModel):
@@ -233,6 +239,7 @@ class RocketRefinmentConfig(BaseModel):
         "feats_path":                "boltz2.feats_path",
         "sampling_mode":             "boltz2.sampling_mode",
         "ddim_steps":                "boltz2.ddim_steps",
+        "reuse_phase1_seed":         "boltz2.reuse_phase1_seed",
         # Metadata
         "note": "note",
     }
