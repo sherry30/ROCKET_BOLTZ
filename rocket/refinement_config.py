@@ -130,7 +130,6 @@ class Boltz2Config(BaseModel):
     boltz2_recycling_steps: int = 3
     boltz2_num_sampling_steps: int = 200
     feats_path: str | None = None
-    precomputed_seed_scan: str | None = None  # path to ROCKET_inputs/seed_scan.npy
     # Sampling mode: "truncated_bptt" | "single_step" | "ddim"
     # single_step: one deterministic denoising call at σ_max (ConForNets approach)
     # ddim: N deterministic DDIM steps; cleaner gradient than truncated_bptt
@@ -232,7 +231,6 @@ class RocketRefinmentConfig(BaseModel):
         "boltz2_recycling_steps":    "boltz2.boltz2_recycling_steps",
         "boltz2_num_sampling_steps": "boltz2.boltz2_num_sampling_steps",
         "feats_path":                "boltz2.feats_path",
-        "precomputed_seed_scan":     "boltz2.precomputed_seed_scan",
         "sampling_mode":             "boltz2.sampling_mode",
         "ddim_steps":                "boltz2.ddim_steps",
         # Metadata

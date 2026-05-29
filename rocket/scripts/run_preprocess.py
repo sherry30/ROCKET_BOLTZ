@@ -511,7 +511,7 @@ def run_boltz2_predict(
 
 def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
     """Generate feats_boltz2.pkl and Boltz-2 ROCKET config YAMLs."""
-    from ..refinement_boltz2 import prepare_boltz2_feats, precompute_boltz2_seeds
+    from ..refinement_boltz2 import prepare_boltz2_feats
     from ..refinement_config import (
         AlgorithmConfig,
         AlphaFoldConfig,
@@ -585,22 +585,8 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     if seg_id:
         phase1_config.algorithm.domain_segs = seg_id
 
-    # Seed scan — evaluate n_seeds_to_scan diffusion seeds with identity bias
-    # so rk.refine can skip the scan and start immediately from the best seeds.
-    seed_scan_path = os.path.join(rocket_inputs, "seed_scan.npy")
-    n_seeds = getattr(args, "n_seeds_to_scan", 9)
-    try:
-        precompute_boltz2_seeds(
-            config=phase1_config,
-            feats=feats,
-            output_path=seed_scan_path,
-            n_seeds=n_seeds,
-        )
-        phase1_config.boltz2.precomputed_seed_scan = seed_scan_path
-        logger.info(f"Saved seed scan → {seed_scan_path}")
-    except Exception as exc:
-        logger.warning(f"Seed scan failed ({exc}); rk.refine will scan at runtime")
-        seed_scan_path = None
+    # Note: the diffusion seed pre-scan runs inline at the start of rk.refine,
+    # in the same sampling mode as refinement (no precompute step here).
 
     phase1_yaml = os.path.join(output_dir, "ROCKET_config_phase1_boltz2.yaml")
     phase1_config.to_yaml_file(phase1_yaml)
@@ -610,8 +596,6 @@ def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) ->
     phase2_config.note = f"phase2_boltz2_{args.file_id}"
     phase2_config.algorithm.iterations = 500
     phase2_config.boltz2.feats_path = feats_path
-    if seed_scan_path:
-        phase2_config.boltz2.precomputed_seed_scan = seed_scan_path
 
     phase2_yaml = os.path.join(output_dir, "ROCKET_config_phase2_boltz2.yaml")
     phase2_config.to_yaml_file(phase2_yaml)
@@ -651,10 +635,6 @@ def parse_args():
     parser.add_argument("--map1", default=None)
     parser.add_argument("--map2", default=None)
     parser.add_argument("--full_composition", default=None)
-    parser.add_argument(
-        "--n_seeds_to_scan", type=int, default=9,
-        help="Number of diffusion seeds to pre-evaluate during Boltz-2 preprocessing (default 9).",
-    )
     parser.add_argument(
         "--sampling_mode", choices=["truncated_bptt", "single_step", "ddim"],
         default="ddim",

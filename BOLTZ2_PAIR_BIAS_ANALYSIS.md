@@ -1,32 +1,51 @@
-# Why the ConForNets Pair Bias Does Not Work for Boltz-2
+# ROCKET Pair Bias for Boltz-2: Why TBPTT Fails and DDIM Works
 
-**Date**: 2026-05-29  
-**Target**: PDB 1lj5 (PAI-1, 1.8 Å)  
-**Model**: Boltz-2 (`boltz2_conf.ckpt`)  
+**Date**: 2026-05-29 (revised)
+**Target**: PDB 1lj5 (PAI-1, 1.8 Å)
+**Model**: Boltz-2 (`boltz2_conf.ckpt`)
 **Approach**: Channel-wise pair-representation bias `z → z @ w_pair + b_pair` before PairFormer
 
 ---
 
-## Summary
+## Summary (revised — DDIM works)
 
-The ConForNets-inspired pair bias (`w_pair [128×128]`, `b_pair [128]`) applied to
-Boltz-2's trunk pair representation **does not produce meaningful structural improvement**
-in X-ray crystallographic refinement.  Three independent experiments and six production
-runs consistently show:
+> **Important correction.** An earlier version of this document concluded the
+> pair bias "does not work," based on ROCKET's **internal** Rwork metric staying
+> flat at 1.27.  That metric is computed on the **normalized E-data scale with
+> complex Fc** and is simply **insensitive** to real crystallographic quality.
+> When validated with `phenix.model_vs_data` against the experimental data, the
+> DDIM runs **genuinely improve the real R-factors**.  The conclusion below
+> supersedes the earlier one.
 
-- R_work stays fixed at ~1.27 (ROCKET scale) across all 100 iterations
-- The pair bias moves atoms by at most **0.19 Å RMSD** even when completely
-  scrambled (`w_dev = 2.0` Frobenius norm from identity)
-- Seed-to-seed LLG variance (σ = 273 units) is **5–55× larger** than any
-  optimisation signal ever observed
-- The best-ever LLG improvement (+66 units, run C of uuid a506809215) does not
-  correspond to any reduction in R_work or R_free
+The verdict depends entirely on **how gradients flow through the diffusion**:
 
-The Boltz-2 results are still valuable: the **initial Boltz-2 prediction** placed
-by Phaser MR gives better conventional R-factors (R_work 0.383 vs 0.411) and RSCC
-(0.706 vs 0.671) than the AF2-ROCKET output, but this improvement is from Boltz-2
-being a better structure predictor for this target — **not** from the ROCKET
-optimisation loop.
+| Sampling mode | Gradient path | Result (real `phenix` R-factors) |
+|---|---|---|
+| **TBPTT** (original) | last K of 200 stochastic Euler steps, each detached | fails — R_free *worsens* slightly |
+| **single-step** | one deterministic denoise at σ_max | works — clean monotone LLG climb |
+| **DDIM** (recommended) | N deterministic steps, fully differentiable chain | **works best** — R_free drops up to 0.050 |
+
+Key real-data result (`phenix.model_vs_data`, 1lj5, before any phenix.refine):
+
+| Run | LLG gain | r_free: start → end | Δr_free |
+|---|---|---|---|
+| Raw Boltz-2 (no ROCKET) | — | 0.4765 | baseline |
+| TBPTT | +5 | 0.4276 → 0.4314 | +0.004 (worse) |
+| DDIM-50 | +283 | 0.4347 → 0.4165 | −0.018 |
+| DDIM_v2 @ peak (iter 62) | +565 | 0.4332 → **0.3982** | −0.035 |
+| DDIM-20, **10 recycles** | +641 | 0.4487 → **0.3987** | **−0.050** |
+
+**LLG is a faithful proxy after all** — the LLG gain correlates monotonically
+with the real r_free drop.  The earlier "decoupled" conclusion was an artefact of
+trusting ROCKET's internal E-scale Rwork instead of real R-factors.
+
+Three things that matter:
+1. **DDIM is essential** — TBPTT's stochastic per-step detaching destroys the
+   gradient signal; DDIM's deterministic differentiable chain preserves it.
+2. **More recycling helps** — 10 recycles gave the largest improvement.
+3. **The collapse is real** — too-high LR (3e-4) + no decay drives Adam off a
+   cliff (single-iteration 11 Å jump); the collapsed structure is *worse* than
+   the raw baseline.  Stable settings: lr=1e-4, smooth decay, grad_clip ≤ 0.5.
 
 ---
 
@@ -449,49 +468,84 @@ geometry restraints to prevent chemically impossible structures.
 
 ## 6. Recommended Next Steps
 
-1. **Implement DDIM multi-step denoising** (Option A, Section 5) — this is
-   the highest-priority fix.  The single-step experiment proves the gradient
-   signal is real and clean.  10–20 deterministic steps should push the structural
-   precision into the range where Rwork actually changes.  The implementation
-   requires replacing `_sample_truncated` in `boltz2_wrapper.py` with a
-   DDIM-style loop using fixed noise samples and no stochastic Euler injection.
+DDIM is implemented (`sampling_mode: ddim` in `boltz2_wrapper.py`) and confirmed
+to improve real R-factors.  The remaining work is tuning and validation:
 
-2. **Run phenix.refine on the AF2-ROCKET output** to establish a fair R-factor
-   baseline.  The current Boltz2 vs AF2 comparison is confounded by the fact
-   that only the Boltz2 result had phenix.refine applied.
+1. **Use DDIM with high recycling as the default.** `sampling_mode: ddim`,
+   `boltz2_recycling_steps: 10` gave the best result (−0.050 r_free).  More
+   recycling = more leverage for the bias through the trunk.
 
-3. **Run Boltz-2 initial prediction → phenix.refine** (without any ROCKET) to
-   quantify how much of the Boltz2 R_work = 0.383 comes from the predictor
-   alone vs the ROCKET optimisation.
+2. **Avoid the collapse.** lr=3e-4 with no decay drives Adam off a cliff
+   (single-iteration 11 Å jump, collapsed structure worse than baseline).
+   Stable settings: lr=1e-4, `smooth_stage_epochs` covering the back third,
+   `grad_clip_norm` ≤ 0.5.
 
----
+3. **Always validate on real R-factors**, not ROCKET's internal Rwork (which is
+   flat/uninformative).  Benchmark pipeline: raw `model_vs_data` → `phenix.refine`
+   → refined `model_vs_data` → superpose to pdb_redo → map-model CC.  (See
+   `benchmark_rocket.sh`.)  Measure both raw and post-refine R-factors, since
+   refinement can mask differences between starting models.
 
-## 7. Production Run Summary
+4. **Isolate the coordinate contribution.** The improvement may partly come from
+   changed pseudo-B factors.  Re-run `model_vs_data` with B-factors fixed to
+   confirm the coordinate-only gain for a clean paper claim.
 
-| UUID | K | Best LLG | LLG gain | Rwork (start→end) | Collapses? |
-|---|---|---|---|---|---|
-| f73d398d31 | 5 | — | — | 1.27→1.27 | Yes (early) |
-| fe68f42376 | 5 | 1149 (iter 0) | −6 | 1.27→1.27 | Yes (iter 23) |
-| a506809215 | 5 | 1091 (iter 18) | +5 | 1.27→1.27 | B: iter 60, C: iter 70 |
-| a4766be58a | 20 | 1090 (iter 19) | +4 | 1.27→1.27 | None in run A |
-
-All runs: **Rwork never improved from 1.27**.  Increasing K from 5 to 20 prevented
-catastrophic collapse (in run A) but did not improve structural quality.
+5. **Establish baselines for the comparison table**: run the identical benchmark
+   on (a) raw Boltz-2 prediction, (b) AF2-ROCKET output, (c) each DDIM variant's
+   best structure.
 
 ---
 
 ## 7. Summary of Methods Tested
 
-| Method | Struct. sensitivity (w_dev=0.3) | LLG σ | Opt. improvement | Rwork change |
-|---|---|---|---|---|
-| TBPTT K=5, final-pass | 0.108 Å | 274 | +5 LLG (iter 18) | None |
-| TBPTT K=20, final-pass | 0.108 Å | 274 | +4 LLG (iter 19) | None |
-| TBPTT K=20, all-passes | 0.163 Å | 274 | +9 LLG (iter 2), diverges | None |
-| **Single-step (ConForNets)** | **0.211 Å** | **118** | **+74 LLG, monotone, 30 iters** | **None** |
-| Target (DDIM multi-step) | ~0.5+ Å | ~80 | expected real improvement | **Expected yes** |
+Validated on **real `phenix.model_vs_data` R-factors** (not ROCKET's internal
+E-scale Rwork, which stays flat at 1.27 for every run and is not informative):
 
-The single-step approach definitively proves the gradient mechanism works — it just
-needs more structural precision.  DDIM multi-step is the implementation path.
+| Method | LLG gain | real r_free: start → end | Δr_free | Verdict |
+|---|---|---|---|---|
+| TBPTT K=20 | +5 | 0.4276 → 0.4314 | +0.004 | fails (slightly worse) |
+| DDIM-50, 3 recycle | +283 | 0.4347 → 0.4165 | −0.018 | works |
+| DDIM-20, 3 recycle, lr3e-4 @peak | +565 | 0.4332 → **0.3982** | −0.035 | works (best single struct) |
+| **DDIM-20, 10 recycle** | **+641** | 0.4487 → **0.3987** | **−0.050** | **best overall** |
+| DDIM_v2 @ collapse (iter 299) | −1191 | 0.4332 → 0.4875 | +0.054 | collapsed, worse than baseline |
+
+**LLG gain correlates monotonically with real r_free improvement** — confirming
+LLG is a faithful objective once the gradient actually reaches the structure
+(which requires DDIM or single-step, not TBPTT).
+
+### Why TBPTT fails but DDIM works
+
+| | TBPTT | single-step | DDIM |
+|---|---|---|---|
+| diffusion steps with grad | last K of 200 | 1 (at σ_max) | all N (deterministic) |
+| per-step `.detach()` | yes (breaks chain) | n/a | no (chain preserved) |
+| stochastic noise in grad path | yes | no | no |
+| structural sensitivity (w_dev=0.3) | 0.11 Å | 0.21 Å | highest |
+| seed LLG σ | 274 | 118 | low |
+| real R-factor improvement | none | yes | **yes, largest** |
+
+TBPTT's stochastic per-step detaching reduces the gradient to ~K independent
+noisy estimates through a single `z_biased` bottleneck — too weak to move the
+structure.  DDIM's deterministic, fully-differentiable chain delivers a clean
+gradient that genuinely repositions atoms toward the crystal structure.
+
+---
+
+## 8. Production Run Summary (internal-metric history)
+
+> Historical note: these runs were judged on ROCKET's internal Rwork (1.27),
+> which we later found uninformative.  Kept for the record; see §7 for the real
+> R-factor verdicts.
+
+| UUID | mode | Best LLG | Collapses? |
+|---|---|---|---|
+| a4766be58a | TBPTT K=20 | 1090 (iter 19) | None |
+| caf8a18c23 | TBPTT K=20 | 1090 (iter 19) | None |
+| 5ff468e5f3 | single-step | 1018 (iter 98) | None |
+| b9c66698ba | DDIM-20 (3 rec) | 1241 (iter 99) | None |
+| 9b68c374fc | DDIM-50 (3 rec) | 1241 (iter 99) | None |
+| b697e363d3 | DDIM-20 (10 rec) | 1504 (iter 99) | None |
+| f61df50c19 | DDIM-20 (lr3e-4, 300it) | 1527 (iter 62) | **Yes, iter 63** |
 
 ---
 

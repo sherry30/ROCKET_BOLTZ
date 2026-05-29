@@ -111,12 +111,6 @@ def cli_run_prep_boltz2() -> None:
         default=500,
         help="Gradient steps for Phase-2 refinement.",
     )
-    parser.add_argument(
-        "--n_seeds_to_scan",
-        type=int,
-        default=9,
-        help="Number of diffusion seeds to evaluate during seed pre-scan (default 9).",
-    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
@@ -139,7 +133,7 @@ def cli_run_prep_boltz2() -> None:
     # ------------------------------------------------------------------
     # 1. Prepare feats (CPU — no GPU needed)
     # ------------------------------------------------------------------
-    from rocket.refinement_boltz2 import prepare_boltz2_feats, precompute_boltz2_seeds
+    from rocket.refinement_boltz2 import prepare_boltz2_feats
 
     feats = prepare_boltz2_feats(
         pdb_path=pdb_path,
@@ -212,25 +206,8 @@ def cli_run_prep_boltz2() -> None:
         ),
     )
 
-    # ------------------------------------------------------------------
-    # 2b. Precompute diffusion seed scan (GPU required)
-    #
-    # Evaluate args.n_seeds diffusion seeds with identity bias once; the best
-    # seeds are then selected by rk.refine without re-scanning.
-    # ------------------------------------------------------------------
-    seed_scan_path = rocket_inputs / "seed_scan.npy"
-    try:
-        precompute_boltz2_seeds(
-            config=phase1_config,
-            feats=feats,
-            output_path=str(seed_scan_path),
-            n_seeds=args.n_seeds_to_scan,
-        )
-        phase1_config.boltz2.precomputed_seed_scan = str(seed_scan_path)
-        print(f"[rk.prep_boltz2] Saved seed scan → {seed_scan_path}")
-    except Exception as exc:
-        print(f"[rk.prep_boltz2] WARNING: seed scan failed ({exc}); rk.refine will scan at runtime")
-        seed_scan_path = None
+    # Note: the diffusion seed pre-scan runs inline at the start of rk.refine,
+    # in the same sampling mode as refinement (no precompute step here).
 
     phase1_yaml = output_dir / "ROCKET_config_phase1_boltz2.yaml"
     phase1_config.to_yaml_file(str(phase1_yaml))
@@ -243,8 +220,6 @@ def cli_run_prep_boltz2() -> None:
     phase2_config.note = f"phase2_boltz2_{args.file_id}"
     phase2_config.algorithm.iterations = args.phase2_iterations
     phase2_config.boltz2.feats_path = str(feats_path)
-    if seed_scan_path:
-        phase2_config.boltz2.precomputed_seed_scan = str(seed_scan_path)
 
     phase2_yaml = output_dir / "ROCKET_config_phase2_boltz2.yaml"
     phase2_config.to_yaml_file(str(phase2_yaml))

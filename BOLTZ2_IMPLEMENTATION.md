@@ -44,7 +44,7 @@ frozen.
 | File | Purpose |
 |---|---|
 | `rocket/boltz2_wrapper.py` | `Boltz2PairBias` — injects the pair bias, runs the trunk recycling loop, implements truncated-backprop diffusion sampling |
-| `rocket/refinement_boltz2.py` | Full refinement loop + `prepare_boltz2_feats` + `precompute_boltz2_seeds` |
+| `rocket/refinement_boltz2.py` | Full refinement loop (incl. inline seed pre-scan) + `prepare_boltz2_feats` |
 | `rocket/coordinates_boltz2.py` | Atom extraction from Boltz-2 output + Kabsch alignment; uses Boltz-2 direct B-factor prediction, falls back to pLDDT→pseudo-B |
 | `rocket/refinement_config.py` | `Boltz2Config` fields; `gen_config_phase2` handles Boltz-2 bias filenames |
 | `rocket/scripts/run_preprocess.py` | `rk.preprocess --model boltz2` — predict + MR + feats + seed scan + configs |
@@ -100,12 +100,12 @@ rk.preprocess \
   --model boltz2 \
   --boltz2_cache_dir /data/dust/group/it/crystalsfirst/dev/shehry/boltz_cache \
   --a3m_path alignments/1lj5/bfd_uniclust_hits.a3m \
-  --n_seeds_to_scan 9
+  --sampling_mode ddim
 ```
 
 `--a3m_path` activates the Boltz-2 MSA module (`z = z + msa_module(...)`) —
-recommended for better gradient signal.  `--n_seeds_to_scan` (default 9)
-controls how many diffusion seeds are pre-evaluated during preprocessing.
+recommended for better gradient signal.  `--sampling_mode` selects the diffusion
+gradient mode (`ddim` recommended; see below).
 
 What this does internally:
 1. Parses FASTA → writes `{file_id}_boltz_input.yaml`
@@ -114,8 +114,7 @@ What this does internally:
 4. Superposes Boltz-2 prediction onto MR model → `ROCKET_inputs/{file_id}-pred-aligned.pdb`
 5. Generates `ROCKET_inputs/{file_id}-Edata.mtz` (normalised structure factors)
 6. Runs `prepare_boltz2_feats` → `ROCKET_inputs/feats_boltz2.pkl`
-7. Pre-evaluates 9 diffusion seeds → `ROCKET_inputs/seed_scan.npy`
-8. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
+7. Writes `ROCKET_config_phase1_boltz2.yaml` and `ROCKET_config_phase2_boltz2.yaml`
 
 Output layout:
 ```
@@ -124,7 +123,6 @@ Output layout:
     1lj5-pred-aligned.pdb
     1lj5-Edata.mtz
     feats_boltz2.pkl
-    seed_scan.npy           ← precomputed seed ranking (loaded by rk.refine)
   ROCKET_config_phase1_boltz2.yaml
   ROCKET_config_phase2_boltz2.yaml
 ```
@@ -135,9 +133,10 @@ Output layout:
 rk.refine 1lj5_processed/ROCKET_config_phase1_boltz2.yaml
 ```
 
-Feats and seed scan paths are embedded in the config — no extra flags needed.
-Phase 1 starts directly from the best precomputed seeds, runs `num_of_runs`
-independent traces (default 3), and saves:
+The feats path is embedded in the config — no extra flags needed.  At the start
+of refinement a **diffusion seed pre-scan** runs inline (in the same sampling
+mode as refinement; see "Seed pre-scan" below), then `num_of_runs` independent
+traces run from the best seeds, saving:
 
 ```
 1lj5_processed/ROCKET_outputs/<uuid>/phase1_boltz2_1lj5/
@@ -145,7 +144,7 @@ independent traces (default 3), and saves:
   best_w_pair_A_18.pt       # channel-wise weight matrix  [128, 128]
   best_b_pair_A_18.pt       # channel-wise bias vector    [128]
   NEG_LLG_it_A.npy, rwork_it_A.npy, rfree_it_A.npy, …
-  seed_scan.npy             # copy of the seed scan used
+  seed_scan.npy             # scan results (LLG, seed) for this run
 ```
 
 **Step 3 — Phase 2 refinement (GPU node)**
@@ -169,22 +168,23 @@ execution:
 
 boltz2:
   boltz2_checkpoint_path: /path/to/boltz2_conf.ckpt
-  feats_path: /path/to/feats_boltz2.pkl         # auto-loaded by rk.refine
-  truncated_backprop_steps: 20                   # K: grad steps in diffusion (K=5 too noisy)
-  boltz2_recycling_steps: 3                      # trunk recycling iterations
-  boltz2_num_sampling_steps: 200                 # total diffusion steps T
-  precomputed_seed_scan: /path/to/seed_scan.npy  # written by rk.preprocess
+  feats_path: /path/to/feats_boltz2.pkl   # auto-loaded by rk.refine
+  truncated_backprop_steps: 20            # K: grad steps for truncated_bptt mode
+  boltz2_recycling_steps: 3               # trunk recycling iterations
+  boltz2_num_sampling_steps: 200          # total diffusion steps T
+  sampling_mode: ddim                     # truncated_bptt | single_step | ddim
+  ddim_steps: 20                          # deterministic steps for ddim mode
 ```
 
-**Truncated backprop note**: `K=5` (2.5% of the 200-step trajectory) gives gradients
-that are too noisy — no Rwork improvement over 100 iterations, and catastrophic LLG
-collapse at iter 60–70 once `w_pair` drifts ~0.5 Frobenius norm from identity.
-`K=20` (10%) is the validated default: 4× stronger and more directionally consistent.
+**Sampling mode note**: `ddim` (deterministic N-step) gives the cleanest gradient
+and the best real R-factor improvement; `single_step` (ConForNets-style) also
+works; `truncated_bptt` (the original K-step stochastic mode) does not improve
+real R-factors.  See `BOLTZ2_PAIR_BIAS_ANALYSIS.md` for the full comparison.
 
-**Seed scan precomputation**: `rk.preprocess --model boltz2` runs
-`precompute_boltz2_seeds()` and writes `ROCKET_inputs/seed_scan.npy`.  The path
-is embedded in the generated configs; `rk.refine` loads it at startup instead of
-re-scanning (saves ~9 model-forward calls per run).  `--n_seeds_to_scan` (default 9).
+**Seed pre-scan**: runs **inline** at the start of `rk.refine`, in the same
+sampling mode as refinement (see "Seed pre-scan" under Optimization details).
+There is no precompute step or stored seed-scan file to keep in sync — the scan
+and the refinement forward pass always agree by construction.
 
 **B-factor note**: `coordinates_boltz2.py` now uses Boltz-2's direct `bfactor_module`
 prediction when available (`model.predict_bfactor=True`, which is the case for
@@ -239,13 +239,21 @@ and made the L2 weight go negative near the end of the stage.
 ### Seed pre-scan
 
 Before the main optimisation loops, `refinement_boltz2.py` scans
-`max(num_of_runs × 3, 6)` diffusion seeds with an identity bias (no gradient).
-It selects the `num_of_runs` seeds that give the highest initial LLG and uses
-those for the optimisation runs.  This matters because seed-to-seed LLG variance
-(~370 units with identity bias) exceeds the optimisation signal (~150 units of
-genuine improvement), so starting from the best seeds is critical.
+`max(num_of_runs × 3, 6)` diffusion seeds with an identity bias (no gradient) and
+selects the `num_of_runs` seeds that give the highest initial LLG.  Seed-to-seed
+LLG variance is large (σ ≈ 270 for TBPTT, ≈ 120 for DDIM), so starting from the
+best seeds helps.
 
-Scan results are saved to `{out_dir}/seed_scan.npy` as `(LLG, seed)` pairs.
+The scan runs **inline at the start of every `rk.refine`**, in the **same
+sampling mode** as refinement.  This is deliberate: the seed → structure mapping
+is mode-dependent (the seed that is best under full TBPTT sampling is not
+necessarily best under DDIM), so a precomputed scan from a different mode would
+select the wrong seeds.  Running it inline guarantees the scan and the refinement
+forward pass always agree — there is no separate precompute step or stored
+seed-scan file to keep in sync.
+
+Scan results are saved to `{out_dir}/seed_scan.npy` as `(LLG, seed)` pairs for
+the record.
 
 ### Rwork interpretation
 
