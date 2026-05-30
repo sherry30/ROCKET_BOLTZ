@@ -34,8 +34,8 @@ from tqdm import tqdm
 from rocket import coordinates as rk_coordinates
 from rocket import refinement_utils as rkrf_utils
 from rocket import utils as rk_utils
-from rocket.boltz2_wrapper import Boltz2PairBias
-from rocket.coordinates_boltz2 import position_alignment_boltz2
+from rocket.boltz2.wrapper import Boltz2PairBias
+from rocket.boltz2.coordinates import position_alignment_boltz2
 from rocket.refinement_config import RocketRefinmentConfig
 from rocket.wandb_logger import WandbLogger
 from rocket.xtal import structurefactors as llg_sf

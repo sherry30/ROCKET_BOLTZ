@@ -43,9 +43,9 @@ frozen.
 
 | File | Purpose |
 |---|---|
-| `rocket/boltz2_wrapper.py` | `Boltz2PairBias` — injects the pair bias, runs the trunk recycling loop, implements truncated-backprop diffusion sampling |
-| `rocket/refinement_boltz2.py` | Full refinement loop (incl. inline seed pre-scan) + `prepare_boltz2_feats` |
-| `rocket/coordinates_boltz2.py` | Atom extraction from Boltz-2 output + Kabsch alignment; uses Boltz-2 direct B-factor prediction, falls back to pLDDT→pseudo-B |
+| `rocket/boltz2/wrapper.py` | `Boltz2PairBias` — injects the pair bias, runs the trunk recycling loop, implements truncated-backprop diffusion sampling |
+| `rocket/boltz2/refinement.py` | Full refinement loop (incl. inline seed pre-scan) + `prepare_boltz2_feats` |
+| `rocket/boltz2/coordinates.py` | Atom extraction from Boltz-2 output + Kabsch alignment; uses Boltz-2 direct B-factor prediction, falls back to pLDDT→pseudo-B |
 | `rocket/refinement_config.py` | `Boltz2Config` fields; `gen_config_phase2` handles Boltz-2 bias filenames |
 | `rocket/scripts/run_preprocess.py` | `rk.preprocess --model boltz2` — predict + MR + feats + seed scan + configs |
 | `rocket/scripts/run_refine.py` | `rk.refine` — dispatches to Boltz-2 backend; loads feats and seed scan from config |
@@ -250,7 +250,7 @@ phase 1 ended on, so the warm-started bias stays matched to its diffusion
 trajectory (re-scanning at identity would drop the learned bias onto a
 mismatched seed — see "Phase-2 seed reuse" under Optimization details).
 
-**B-factor note**: `coordinates_boltz2.py` now uses Boltz-2's direct `bfactor_module`
+**B-factor note**: `boltz2/coordinates.py` now uses Boltz-2's direct `bfactor_module`
 prediction when available (`model.predict_bfactor=True`, which is the case for
 `boltz2_conf.ckpt`).  The module outputs a histogram over B ∈ [0, 100] Å²; the
 expected value is taken via softmax and broadcast from tokens to atoms.  If the
@@ -340,7 +340,7 @@ and made the L2 weight go negative near the end of the stage.
 
 ### Seed pre-scan
 
-Before the main optimisation loops, `refinement_boltz2.py` scans
+Before the main optimisation loops, `boltz2/refinement.py` scans
 `max(num_of_runs × 3, 6)` diffusion seeds with an identity bias (no gradient) and
 selects the `num_of_runs` seeds that give the highest initial LLG.  Seed-to-seed
 LLG variance is large (σ ≈ 270 for TBPTT, ≈ 120 for DDIM), so starting from the

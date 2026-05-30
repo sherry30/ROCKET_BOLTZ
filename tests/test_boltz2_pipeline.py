@@ -63,7 +63,7 @@ def warn(label: str, detail: str = "") -> None:
 
 def _make_wrapper(device: str):
     """Construct a Boltz2PairBias in the pipeline-default (DDIM) sampling mode."""
-    from rocket.boltz2_wrapper import Boltz2PairBias
+    from rocket.boltz2.wrapper import Boltz2PairBias
 
     wrapper = Boltz2PairBias(
         checkpoint_path=CKPT,
@@ -126,7 +126,7 @@ def check_forward(feats: dict, device: str):
 # ===========================================================================
 def check_bfactors(feats_gpu: dict, device: str) -> bool:
     import torch
-    from rocket.coordinates_boltz2 import position_alignment_boltz2
+    from rocket.boltz2.coordinates import position_alignment_boltz2
     from rocket.xtal import structurefactors as llg_sf
 
     print("\n[3] B-factor extraction + clamp")
@@ -149,7 +149,7 @@ def check_bfactors(feats_gpu: dict, device: str) -> bool:
 # 4. coordinate extraction / topology
 # ===========================================================================
 def check_coord_extraction(model_out: dict, feats_gpu: dict, device: str) -> bool:
-    from rocket.coordinates_boltz2 import extract_allatoms_boltz2
+    from rocket.boltz2.coordinates import extract_allatoms_boltz2
     from rocket.xtal import structurefactors as llg_sf
 
     print("\n[4] coordinate extraction + SFC topology")
@@ -179,7 +179,7 @@ def check_llg_and_gradient(feats_gpu: dict, device: str) -> bool:
     import torch
     from rocket import coordinates as rk_coordinates
     from rocket import refinement_utils as rkrf_utils
-    from rocket.coordinates_boltz2 import position_alignment_boltz2
+    from rocket.boltz2.coordinates import position_alignment_boltz2
     from rocket.xtal import structurefactors as llg_sf
 
     print("\n[5] LLG + gradient flow + optimizer step")

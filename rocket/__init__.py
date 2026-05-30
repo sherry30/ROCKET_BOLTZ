@@ -1,28 +1,26 @@
 # Top Level API
 # Submodules
-from rocket import base, coordinates, coordinates_boltz2, cryo, refinement_utils, utils, xtal
+from rocket import base, boltz2, coordinates, cryo, refinement_utils, utils, xtal
 from rocket.base import MSABiasAFv1, MSABiasAFv2, MSABiasAFv3, TemplateBiasAF
-from rocket.boltz2_wrapper import Boltz2PairBias
-from rocket.coordinates_boltz2 import (
+from rocket.boltz2 import (
+    Boltz2PairBias,
     decode_atom_names,
     extract_allatoms_boltz2,
     position_alignment_boltz2,
+    prepare_boltz2_feats,
+    run_boltz2_xray_refinement,
 )
 from rocket.helper import make_processed_dict_from_template
 from rocket.msa_cluster import run_msa_cluster
 from rocket.msa_score import run_msa_score
 from rocket.mse import MSEloss, MSElossBB
-from rocket.refinement_boltz2 import (
-    prepare_boltz2_feats,
-    run_boltz2_xray_refinement,
-)
 from rocket.xtal.targets import LLGloss
 
 __all__ = [
     # Submodules
     "base",
+    "boltz2",
     "coordinates",
-    "coordinates_boltz2",
     "xtal",
     "cryo",
     "utils",

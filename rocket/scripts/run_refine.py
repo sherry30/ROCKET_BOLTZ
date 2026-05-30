@@ -27,7 +27,7 @@ def run_refinement(
     model = getattr(config, "model", "alphafold")
 
     if model == "boltz2":
-        from ..refinement_boltz2 import run_boltz2_xray_refinement  # noqa: PLC0415
+        from ..boltz2.refinement import run_boltz2_xray_refinement  # noqa: PLC0415
         if feats is None:
             feats_path = getattr(config.boltz2, "feats_path", None)
             if feats_path is None:

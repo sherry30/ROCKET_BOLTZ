@@ -58,6 +58,33 @@ def run_command(command, env_source=None):
     subprocess.run(cmd_str, shell=True, check=True, executable="/bin/bash")
 
 
+def _prepare_openfold_fasta(file_id, output_dir):
+    """Return a FASTA dir whose single record is headed exactly ``>{file_id}``.
+
+    OpenFold names BOTH the per-sequence alignment subdir and the output PDB after
+    the FASTA header tag (``re.split(r'\\W| \\|', header)[0]``).  The rest of
+    preprocess keys off ``file_id``: alignments live in ``alignments/<file_id>/``
+    and the prediction is expected at ``<file_id>_model_1_ptm_unrelaxed.pdb``.  An
+    RCSB-style header such as ``>4NTZ_1|Chain A|...`` yields tag ``4NTZ_1`` and
+    breaks both lookups.  Normalising the header here keeps the OpenFold path
+    tolerant of any input header, just like the Boltz path already is.
+    """
+    src = os.path.join(f"{file_id}_fasta", f"{file_id}.fasta")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"FASTA file not found: {src}")
+    sequences = _read_fasta_sequences(src)
+    if len(sequences) != 1:
+        # model_1_ptm is a monomer preset; leave a non-single-sequence FASTA
+        # untouched and let OpenFold surface the error.
+        return f"{file_id}_fasta"
+    norm_dir = os.path.join(output_dir, "openfold_fasta")
+    os.makedirs(norm_dir, exist_ok=True)
+    norm_path = os.path.join(norm_dir, f"{file_id}.fasta")
+    with open(norm_path, "w") as fp:
+        fp.write(f">{file_id}\n{sequences[0]['sequence']}\n")
+    return norm_dir
+
+
 def run_openfold(
     file_id,
     output_dir,
@@ -67,7 +94,7 @@ def run_openfold(
     use_deepspeed_evoformer_attention,
 ):
     """Runs OpenFold inference using the specified parameters."""
-    fasta_dir = f"{file_id}_fasta"
+    fasta_dir = _prepare_openfold_fasta(file_id, output_dir)
     predicted_model = os.path.join(
         output_dir, "predictions", f"{file_id}_model_1_ptm_unrelaxed.pdb"
     )
@@ -637,7 +664,7 @@ def _write_boltz2_variant_configs(
 
 def _generate_boltz2_outputs(args, seg_id: list | None, a3m_path: str = None) -> None:
     """Generate feats_boltz2.pkl and the Boltz-2 ROCKET config YAMLs (all modes)."""
-    from ..refinement_boltz2 import prepare_boltz2_feats
+    from ..boltz2.refinement import prepare_boltz2_feats
 
     output_dir = os.path.abspath(args.output_dir)
     rocket_inputs = os.path.join(output_dir, "ROCKET_inputs")
