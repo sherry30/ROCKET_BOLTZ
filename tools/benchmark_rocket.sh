@@ -31,15 +31,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
 cat <<EOF
-Usage: $0 --pdb <model.pdb> --label <name> --exp-mtz <data.mtz> [options]
+Usage: $0 --id <pdb-id> --pdb <model.pdb> --label <name> [options]
 
 Required:
   --pdb           PATH    input model to benchmark
-  --label         NAME    short label (output goes to benchmark_<label>/)
-  --exp-mtz       PATH    experimental data MTZ (for R-factors / refinement)
+                          (with --id, may be relative to <base>/<id>/)
+  --label         NAME    short label (output goes to <outdir>)
+
+Dataset location (derives --exp-mtz / --ref-pdb automatically):
+  --id | --pdb-id ID      protein id; resolves under <base>/<id>/<id>_data/:
+                            exp-mtz -> <base>/<id>/<id>_data/<id>.mtz
+                            ref-pdb -> <base>/<id>/<id>_data/<id>.pdb
+  --base          PATH    dataset root
+                          [default: $BASE]
+  --exp-mtz       PATH    experimental data MTZ (overrides --id default)
 
 Ground-truth (optional — enables RMSD + RSCC):
-  --ref-pdb       PATH    deposited/ground-truth PDB (for superpose + RMSD)
+  --ref-pdb       PATH    deposited/ground-truth PDB (overrides --id default)
   --ref-mtz       PATH    ground-truth map-coeff MTZ (for map-model CC / RSCC)
   --ref-map-labels STR    map coeff labels in ref-mtz       [default: FWT,PHWT]
   --resolution    FLOAT   resolution for map-model CC (A)   [default: 2.0]
@@ -56,23 +64,23 @@ Refinement / data options:
   --macrocycles   INT     phenix.refine macrocycles         [default: 5]
   --strategy      STR     refine strategy
                           [default: individual_sites+individual_adp+occupancies]
-  --outdir        PATH    output directory             [default: benchmark_<label>]
+  --outdir        PATH    output directory       [default: ./benchmarks/<id>/<label>]
+                          (aliases: --output-dir, --output_dir)
   --skip-refine           only compute RAW R-factors (steps 2-5 skipped)
   -h | --help             show this help
 
 Example:
   $0 \\
-    --pdb   /path/A_99_postRBR.pdb \\
-    --label ddim10_best \\
-    --exp-mtz /path/1lj5-tng_withrfree.mtz \\
-    --ref-pdb /path/pdb_redo/1lj5_final.pdb \\
-    --ref-mtz /path/pdb_redo/1lj5_final.mtz \\
-    --resolution 1.8
+    --id    4ntz \\
+    --label 4ntz_ddim50 \\
+    --pdb   4ntz_processed/ROCKET_outputs/df7cf3c26a/phase1_boltz2_4ntz_ddim_50/best_model_A_296.pdb
 EOF
 exit 1
 }
 
 # ---- defaults -------------------------------------------------------------
+BASE="/data/dust/group/it/crystalsfirst/dev/shehry/data/thesis"
+ID=""
 PDB=""; LABEL=""; EXP_MTZ=""
 REF_PDB=""; REF_MTZ=""; REF_MAP_LABELS="FWT,PHWT"; RESOLUTION="2.0"
 FREE_LABEL="R-free-flags"; MACROCYCLES="5"
@@ -83,6 +91,8 @@ CC_MTZ=""; CC_FOBS=""; CC_SIGF=""; NO_CC=0
 # ---- parse flags ----------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
+        --base)           BASE="$2"; shift 2;;
+        --id|--pdb-id)    ID="$2"; shift 2;;
         --pdb)            PDB="$2"; shift 2;;
         --label)          LABEL="$2"; shift 2;;
         --exp-mtz)        EXP_MTZ="$2"; shift 2;;
@@ -93,7 +103,7 @@ while [ $# -gt 0 ]; do
         --free-label)     FREE_LABEL="$2"; shift 2;;
         --macrocycles)    MACROCYCLES="$2"; shift 2;;
         --strategy)       STRATEGY="$2"; shift 2;;
-        --outdir)         OUTDIR="$2"; shift 2;;
+        --outdir|--output-dir|--output_dir) OUTDIR="$2"; shift 2;;
         --skip-refine)    SKIP_REFINE=1; shift;;
         --cc-mtz)         CC_MTZ="$2"; shift 2;;
         --cc-fobs)        CC_FOBS="$2"; shift 2;;
@@ -104,10 +114,21 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# ---- derive data paths from --base/--id -----------------------------------
+# Layout assumed:  <base>/<id>/<id>_data/<id>.mtz  and  <base>/<id>/<id>.pdb
+# Explicit --exp-mtz / --ref-pdb flags always win over these defaults.
+if [ -n "$ID" ]; then
+    DATA_DIR="$BASE/$ID/${ID}_data"
+    [ -z "$EXP_MTZ" ] && EXP_MTZ="$DATA_DIR/${ID}.mtz"
+    [ -z "$REF_PDB" ] && REF_PDB="$DATA_DIR/${ID}.pdb"
+    # allow --pdb to be given relative to <base>/<id>
+    [ -n "$PDB" ] && [ ! -f "$PDB" ] && [ -f "$BASE/$ID/$PDB" ] && PDB="$BASE/$ID/$PDB"
+fi
+
 # ---- validate -------------------------------------------------------------
 [ -z "$PDB" ]     && { echo "ERROR: --pdb required";     usage; }
 [ -z "$LABEL" ]   && { echo "ERROR: --label required";   usage; }
-[ -z "$EXP_MTZ" ] && { echo "ERROR: --exp-mtz required"; usage; }
+[ -z "$EXP_MTZ" ] && { echo "ERROR: --exp-mtz required (or pass --id to derive it)"; usage; }
 [ -f "$PDB" ]     || { echo "ERROR: pdb not found: $PDB"; exit 1; }
 [ -f "$EXP_MTZ" ] || { echo "ERROR: exp-mtz not found: $EXP_MTZ"; exit 1; }
 command -v phenix.model_vs_data >/dev/null || {
@@ -115,11 +136,13 @@ command -v phenix.model_vs_data >/dev/null || {
 
 PDB=$(readlink -f "$PDB")
 EXP_MTZ=$(readlink -f "$EXP_MTZ")
+# --id-derived ref-pdb is optional: drop it silently if the file is absent
+[ -n "$REF_PDB" ] && [ ! -f "$REF_PDB" ] && [ -n "$ID" ] && REF_PDB=""
 [ -n "$REF_PDB" ] && REF_PDB=$(readlink -f "$REF_PDB")
 [ -n "$REF_MTZ" ] && REF_MTZ=$(readlink -f "$REF_MTZ")
 [ -z "$CC_MTZ" ] && CC_MTZ="$EXP_MTZ"
 [ -n "$CC_MTZ" ] && CC_MTZ=$(readlink -f "$CC_MTZ")
-[ -z "$OUTDIR" ] && OUTDIR="benchmark_${LABEL}"
+[ -z "$OUTDIR" ] && OUTDIR="./benchmarks/${ID:-$LABEL}/${LABEL}"
 
 mkdir -p "$OUTDIR"; cd "$OUTDIR"
 cp "$PDB" input.pdb
